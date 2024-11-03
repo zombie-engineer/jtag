@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdbool.h>
 
 /* USER CODE END Includes */
 
@@ -47,6 +48,9 @@ SPI_HandleTypeDef hspi1;
 PCD_HandleTypeDef hpcd_USB_FS;
 
 /* USER CODE BEGIN PV */
+#define SWD_ACK_OK    0
+#define SWD_ACK_WAIT  1
+#define SWD_ACK_FAULT 2
 
 /* USER CODE END PV */
 
@@ -105,6 +109,8 @@ volatile int tdo = 0;
 #define delay_us(__n) HAL_Delay(__n)
 #define swclk_lo() TCLK_LO()
 #define swclk_hi() TCLK_HI()
+#define swdio_lo() TMS_LO()
+#define swdio_hi() TMS_HI()
 
 void clock_pulse()
 {
@@ -114,14 +120,51 @@ void clock_pulse()
     delay_us(1);
 }
 
+void swdio_as_output(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = JTAG_TMS_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(JTAG_TMS_GPIO_Port, &GPIO_InitStruct);
+}
+
+void swdio_as_input(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = JTAG_TMS_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(JTAG_TMS_GPIO_Port, &GPIO_InitStruct);
+}
+
 void swd_write_bit(uint8_t bit)
 {
+    swdio_as_output();
+
     if (bit)
         swdio_hi();
     else
         swdio_lo();
 
     clock_pulse();
+}
+
+bool swdio_read(void)
+{
+  return HAL_GPIO_ReadPin(JTAG_TMS_GPIO_Port, JTAG_TMS_Pin);
+}
+
+uint8_t swd_read_bit(void)
+{
+  swdio_as_input();
+  swclk_lo();
+  delay_us(1);
+  uint8_t bit = swdio_read();
+  swclk_hi();
+  delay_us(1);
+  return bit;
 }
 
 void swd_line_reset(void)
@@ -133,87 +176,230 @@ void swd_line_reset(void)
     }
 }
 
+
+#define SWDIO_MODE_FLOAT() gpio_mode_setup(SWDIO_PORT, GPIO_MODE_INPUT, \
+                                           GPIO_PUPD_NONE, SWDIO_PIN);
+
+#define SWDIO_MODE_DRIVE() gpio_mode_setup(SWDIO_PORT, GPIO_MODE_OUTPUT, \
+                                           GPIO_PUPD_NONE, SWDIO_PIN);
+
+static void swd_turnaround(uint8_t dir)
+{
+  static uint8_t olddir = 0;
+
+  if(dir == olddir)
+    return;
+
+  olddir = dir;
+
+  if(dir)
+    swdio_as_input();
+
+  swclk_hi();
+  swclk_lo();
+
+  if(!dir)
+    swdio_as_output();
+}
+
+static void swd_bit_out(uint8_t val)
+{
+  if (val)
+    swdio_hi();
+  else
+    swdio_lo();
+  swclk_hi();
+  swclk_lo();
+}
+
+
+void swd_reset(void)
+{
+  swd_turnaround(0);
+  /* 50 clocks with TMS high */
+  for(int i = 0; i < 50; i++)
+    swd_bit_out(1);
+}
+
+void swd_seq_out(uint32_t bits, int num)
+{
+  swd_turnaround(0);
+
+  while(num--) {
+    swd_bit_out(bits & 1);
+    bits >>= 1;
+  }
+}
+
+void jtagtap_srst(bool assert)
+{
+  (void)assert;
+#ifdef SRST_SET_VAL
+  SRST_SET_VAL(assert);
+  if(assert) {
+  int i;
+  for(i = 0; i < 10000; i++)
+    asm volatile("nop");
+  }
+#endif
+}
+
+static bool swd_bit_in(void)
+{
+  bool res;
+  res = swdio_read();
+  swclk_hi();
+  swclk_lo();
+  return res;
+}
+
+uint32_t swd_seq_in(int num)
+{
+  uint32_t index = 1;
+  uint32_t ret = 0;
+
+  swd_turnaround(1);
+
+  while (num--) {
+    if (swd_bit_in())
+      ret |= index;
+    index <<= 1;
+  }
+
+  return ret;
+}
+
+uint8_t swd_seq_in_parity(uint32_t *ret, int num)
+{
+  uint32_t index = 1;
+  uint8_t parity = 0;
+  *ret = 0;
+
+  swd_turnaround(1);
+
+  while (num--) {
+    if (swd_bit_in()) {
+      *ret |= index;
+      parity ^= 1;
+    }
+    index <<= 1;
+  }
+
+  if (swd_bit_in())
+    parity ^= 1;
+
+  return parity;
+}
+
+volatile uint32_t idcode = 0;
+
+#define SWD_PARITY_BIT 0x20
+#define NUM_TRIES 1000
+
+void swd_seq_out_parity(uint32_t value, int num_bits)
+{
+  uint8_t parity = 0;
+
+  swd_turnaround(0);
+
+  for (int i = 0; i < num_bits; ++i) {
+    swd_bit_out(value & 1);
+    parity ^= value;
+    value >>= 1;
+  }
+  swd_bit_out(parity & 1);
+}
+
+static uint32_t swd_low_access(bool is_ap, bool is_read_op, uint8_t addr,
+  uint32_t value)
+{
+  uint8_t request = 0x81;
+  uint32_t response;
+  uint8_t ack;
+
+#if 0
+  if(is_ap && dp->fault)
+    return 0;
+#endif
+
+  if (is_ap)
+    request ^= (0x02 | SWD_PARITY_BIT);
+
+  if (is_read_op)
+    request ^= (0x04 | SWD_PARITY_BIT);
+
+  addr &= 0xC;
+  request |= (addr << 1) & 0x18;
+
+  if(addr == 4 || addr == 8)
+    request ^= SWD_PARITY_BIT;
+
+  for (int i = 0; i < NUM_TRIES; ++i) {
+    swd_seq_out(request, 8);
+    ack = swd_seq_in(3);
+    if (ack != SWD_ACK_WAIT)
+      break;
+  };
+
+  if (ack == SWD_ACK_WAIT)
+    return -1;
+
+  if (ack == SWD_ACK_FAULT)
+    return -1;
+
+  if (ack != SWD_ACK_OK)
+    return -1;
+
+  if (is_read_op) {
+    /* Give up on parity error */
+    if (swd_seq_in_parity(&response, 32))
+      return -1;
+  } else
+    swd_seq_out_parity(value, 32);
+
+// /* REMOVE THIS */
+//  swd_seq_out(0, 8);
+  return response;
+}
+
 // swd-to-jtag switch sequence
 void swd_init(void)
 {
-    // Step 1: swd line reset
-    swd_line_reset();
+  swd_reset();
+  int ack;
+  uint32_t code;
 
-    // Step 2: Send swd activation sequence (0b10110000)
-    swd_write_bit(1);
-    swd_write_bit(0);
-    swd_write_bit(1);
-    swd_write_bit(1);
-    swd_write_bit(0);
-    swd_write_bit(0);
-    swd_write_bit(0);
-    swd_write_bit(0);
+  /* 0b0111100111100111 */
+  swd_seq_out(0xe79e, 16);
 
-    // Additional 16 clock pulses for alignment
-    for (int i = 0; i < 16; i++)
-    {
-        swdio_hi();
-        clock_pulse();
-    }
-}
+  swd_reset();
 
-void swd_write_bits(uint8_t value, uint8_t bits)
-{
-    for (uint8_t i = 0; i < bits; i++) 
-    {
-        swd_write_bit(value & 1);
-        value >>= 1;
-    }
-}
+  swd_seq_out(0, 16);
+  jtagtap_srst(true);
+  /* 1010 0101 -> 10100101 */
+  /*              ^^^^^^^^
+                  ||||||||
+                  ||||||||
+                  |||||||Park
+                  ||||||Stop
+                  |||||Parity
+                  |||A[2:3]
+                  ||RnW (Read)
+                  |APDP (DP)
+                  Start
+                  */
+  swd_seq_out(0xa5, 8);
+  ack = swd_seq_in(3);
+  if (ack != 1 || swd_seq_in_parity(&code, 32))
+  {
+    while(1);
+  }
+  else
+  {
+    idcode = code;
+    while(1);
+  }
 
-uint8_t swd_read_bits(uint8_t bits)
-{
-    uint8_t value = 0;
-    for (uint8_t i = 0; i < bits; i++)
-    {
-        swclk_lo();
-        delay_us(1);
-        if (read_swdio())  // Assumes a macro or function to read the swdio pin
-        {
-            value |= (1 << i);
-        }
-        swclk_hi();
-        delay_us(1);
-    }
-    return value;
-}
-
-uint32_t swd_read_id(void)
-{
-    uint32_t idcode = 0;
-
-    // Send header for READ ID (APnDP=0, RnW=1, Address=0x00, Parity)
-    swd_write_bits(0b10100101, 8);
-
-    // Wait for ack response
-    uint8_t ack = swd_read_bits(3);
-    if (ack != 0b001)  // ack_ok
-    {
-        printf("swd ack failure: %02X\n", ack);
-        return 0;
-    }
-
-    // Read 32-bit idcode
-    idcode = swd_read_bits(32);
-
-    // Read parity bit (ignored here but should match calculated parity)
-    uint8_t parity = swd_read_bits(1);
-
-    // End with 8 clock cycles for turnaround
-    for (int i = 0; i < 8; i++)
-    {
-        swclk_hi();
-        delay_us(1);
-        swclk_lo();
-        delay_us(1);
-    }
-
-    return idcode;
 }
 
 
@@ -258,11 +444,9 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   swd_init();
-  uint32_t idcode = swd_read_id();
 
   while (1)
   {
-    tdo = TDO_READ();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
