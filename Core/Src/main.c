@@ -130,6 +130,16 @@ void swdio_as_output(void)
     HAL_GPIO_Init(JTAG_TMS_GPIO_Port, &GPIO_InitStruct);
 }
 
+void jtag_tms_init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = JTAG_TMS_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(JTAG_TMS_GPIO_Port, &GPIO_InitStruct);
+}
+
 void swdio_as_input(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
@@ -292,6 +302,7 @@ uint8_t swd_seq_in_parity(uint32_t *ret, int num)
 }
 
 volatile uint32_t idcode = 0;
+volatile uint32_t idcode2 = 0;
 
 #define SWD_PARITY_BIT 0x20
 #define NUM_TRIES 1000
@@ -362,6 +373,71 @@ static uint32_t swd_low_access(bool is_ap, bool is_read_op, uint8_t addr,
   return response;
 }
 
+uint8_t jtag_next(uint8_t tms, uint8_t databit)
+{
+  uint8_t ret;
+
+  if (tms)
+    TMS_HI();
+  else
+    TMS_LO();
+
+  if (databit)
+    TDI_HI();
+  else
+    TDI_LO();
+
+  TCLK_HI();
+  HAL_Delay(1);
+  ret = TDO_READ();
+  TCLK_LO();
+
+  return ret != 0;
+}
+
+void jtag_tms_seq(uint32_t value, size_t len)
+{
+  for (size_t i = 0; i < len; ++i) {
+    jtag_next(value & 1, 1);
+    value >>= 1;
+  }
+}
+
+void jtag_soft_reset(void)
+{
+  jtag_tms_seq(0x1f, 6);
+}
+
+void jtag_shift_ir(void)
+{
+  jtag_tms_seq(0x03, 4);
+}
+
+void jtag_shift_to_update_ir(void)
+{
+  jtag_tms_seq(0x03, 4);
+}
+
+void jtag_init(void)
+{
+  jtag_tms_init();
+  for (int i = 0; i < 50; ++i)
+    jtag_next(1, 0);
+
+  jtag_tms_seq(0xe73c, 16);
+  jtag_soft_reset();
+}
+
+void jtag_reset(void)
+{
+  TRST_LO();
+  for (volatile int i = 0; i < 10000; ++i)
+    asm("nop");
+  TRST_HI();
+  jtag_soft_reset();
+}
+
+
 // swd-to-jtag switch sequence
 void swd_init(void)
 {
@@ -402,6 +478,61 @@ void swd_init(void)
 
 }
 
+volatile int last_ir = 0;
+
+volatile int vvv = 0;
+
+int irlen0 = 5;
+int irlen1 = 4;
+
+static int jtag_scan_num_devs(void)
+{
+  int num_devs;
+  size_t i;
+  size_t irchain_len = irlen0 + irlen1;
+
+  jtag_shift_ir();
+
+  /* Set to BYPASS mode */
+  for (i = 0; i < irchain_len; ++i)
+    jtag_next(0, 1);
+
+  /* SHIFT-IR to SHIFT-DR */
+  jtag_tms_seq(0x07, 5);
+
+  /* Set a lot of zeroes */
+  for (i = 0; i < 500; ++i)
+    jtag_next(0, 0);
+
+  /* Expect delay of 2 clocks before seeing first 1 */
+  for (i = 0; i < 500; ++i)
+    if (jtag_next(0, 1))
+      break;
+  
+  /* SHIFT-DR to Run-Test/Idle */
+  jtag_soft_reset();
+  num_devs = i;
+  return num_devs;
+}
+
+volatile int v1 = 1;
+volatile int numbits = 10;
+volatile bool ir_shift = 1;
+
+static void do_test_scan(int value, int numbits, bool ir_shift)
+{
+  if (ir_shift) {
+    jtag_tms_seq(0x03, 4);
+  }
+  else {
+    jtag_tms_seq(0x02, 4);
+  }
+
+  for (int i = 0; i < numbits; ++i) {
+    jtag_next(0, value);
+  }
+  jtag_soft_reset();
+}
 
 /* USER CODE END 0 */
 
@@ -411,6 +542,7 @@ void swd_init(void)
   */
 int main(void)
 {
+  int num_devs = 0;
 
   /* USER CODE BEGIN 1 */
 
@@ -443,6 +575,50 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  while(vvv);
+  jtag_init();
+  jtag_reset();
+
+  num_devs = jtag_scan_num_devs();
+
+  jtag_shift_ir();
+  while(1) {
+    do_test_scan(v1, numbits, ir_shift);
+  }
+
+  last_ir = jtag_next(0, 0);
+  last_ir = jtag_next(0, 1);
+  last_ir = jtag_next(0, 1);
+  last_ir = jtag_next(0, 1);
+
+  last_ir = jtag_next(0, 1);
+  last_ir = jtag_next(0, 1);
+  last_ir = jtag_next(0, 1);
+  last_ir = jtag_next(0, 1);
+  last_ir = jtag_next(0, 1);
+
+  /* SHIFT-IR to SHIFT-DR */
+  jtag_tms_seq(0x07, 5);
+
+  for (int i = 0; i < 32; ++i) {
+    last_ir = jtag_next(0, 0);
+    idcode = (idcode << 1) | last_ir;
+  }
+
+  for (int i = 0; i < 32; ++i) {
+    last_ir = jtag_next(0, 0);
+    idcode2 = (idcode2 << 1) | last_ir;
+  }
+
+  for (int i = 0; i < 50; ++i) {
+    last_ir = jtag_next(0, 1);
+  }
+
+  if (!jtag_next(0, 1)) {
+    while (1);
+  }
+
+  while(1);
   swd_init();
 
   while (1)
