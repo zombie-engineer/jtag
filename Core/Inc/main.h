@@ -73,6 +73,8 @@ void Error_Handler(void);
 #define OSC_IN_GPIO_Port GPIOF
 #define OSC_OUT_Pin GPIO_PIN_1
 #define OSC_OUT_GPIO_Port GPIOF
+#define JTAG_RTCK_Pin GPIO_PIN_2
+#define JTAG_RTCK_GPIO_Port GPIOF
 #define B1_Pin GPIO_PIN_0
 #define B1_GPIO_Port GPIOA
 #define JTAG_TDI_Pin GPIO_PIN_1

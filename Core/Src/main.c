@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
+#include "jtag_state.h"
 
 /* USER CODE END Includes */
 
@@ -75,8 +76,10 @@ static void MX_USB_PCD_Init(void);
 #define TCLK_TICK() \
   do { \
     TCLK_HI(); \
+    RTCK_READ(); \
     HAL_Delay(100); \
     TCLK_LO(); \
+    RTCK_READ(); \
     HAL_Delay(100); \
     num_ticks++; \
   } while(0)
@@ -96,6 +99,9 @@ static void MX_USB_PCD_Init(void);
 #define TDO_READ() \
     HAL_GPIO_ReadPin(JTAG_TDO_GPIO_Port, JTAG_TDO_Pin)
 
+#define RTCK_READ() \
+    HAL_GPIO_ReadPin(JTAG_RTCK_GPIO_Port, JTAG_RTCK_Pin)
+
 #define TMS_HI() \
   HAL_GPIO_WritePin(JTAG_TMS_GPIO_Port, JTAG_TMS_Pin, GPIO_PIN_SET)
 
@@ -104,6 +110,7 @@ static void MX_USB_PCD_Init(void);
 
 volatile int num_ticks = 0;
 volatile int tdo = 0;
+volatile int rtck = 0;
 
 
 #define delay_us(__n) HAL_Delay(__n)
@@ -111,6 +118,9 @@ volatile int tdo = 0;
 #define swclk_hi() TCLK_HI()
 #define swdio_lo() TMS_LO()
 #define swdio_hi() TMS_HI()
+
+jtag_state_t jtag_state;
+int jtag_state_errors = 0;
 
 void clock_pulse()
 {
@@ -375,8 +385,6 @@ static uint32_t swd_low_access(bool is_ap, bool is_read_op, uint8_t addr,
 
 uint8_t jtag_next(uint8_t tms, uint8_t databit)
 {
-  uint8_t ret;
-
   if (tms)
     TMS_HI();
   else
@@ -388,11 +396,14 @@ uint8_t jtag_next(uint8_t tms, uint8_t databit)
     TDI_LO();
 
   TCLK_HI();
-  HAL_Delay(1);
-  ret = TDO_READ();
-  TCLK_LO();
+  tdo = TDO_READ();
 
-  return ret != 0;
+  rtck = RTCK_READ();
+  HAL_Delay(1);
+  TCLK_LO();
+  rtck = RTCK_READ();
+
+  return tdo != 0;
 }
 
 void jtag_tms_seq(uint32_t value, size_t len)
@@ -405,13 +416,35 @@ void jtag_tms_seq(uint32_t value, size_t len)
 
 void jtag_soft_reset(void)
 {
-  jtag_tms_seq(0x1f, 6);
+  jtag_tms_seq(0b011111, 6);
+  jtag_state = JTAG_STATE_RUN_TEST_IDLE;
+}
+
+bool jtag_to_state(jtag_state_t to)
+{
+  const struct jtag_state_path *path;
+
+  path = jtag_get_state_path(jtag_state, to);
+  if (!path) {
+    jtag_state_errors++;
+    return false;
+  }
+
+  jtag_tms_seq(path->path, path->n);
+  jtag_state = to;
+  return true;
+}
+
+void jtag_shift_dr(void)
+{
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
 }
 
 void jtag_shift_ir(void)
 {
-  jtag_tms_seq(0x03, 4);
+  jtag_to_state(JTAG_STATE_SHIFT_IR);
 }
+
 
 void jtag_shift_to_update_ir(void)
 {
@@ -489,7 +522,7 @@ static int jtag_scan_num_devs(void)
 {
   int num_devs;
   size_t i;
-  size_t irchain_len = irlen0 + irlen1;
+  size_t irchain_len = 4;
 
   jtag_shift_ir();
 
@@ -498,7 +531,7 @@ static int jtag_scan_num_devs(void)
     jtag_next(0, 1);
 
   /* SHIFT-IR to SHIFT-DR */
-  jtag_tms_seq(0x07, 5);
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
 
   /* Set a lot of zeroes */
   for (i = 0; i < 500; ++i)
@@ -515,24 +548,276 @@ static int jtag_scan_num_devs(void)
   return num_devs;
 }
 
-volatile int v1 = 1;
-volatile int numbits = 10;
-volatile bool ir_shift = 1;
-
-static void do_test_scan(int value, int numbits, bool ir_shift)
+static void jtag_shift(uint64_t value, uint64_t *out_value, size_t num_bits)
 {
-  if (ir_shift) {
-    jtag_tms_seq(0x03, 4);
-  }
-  else {
-    jtag_tms_seq(0x02, 4);
+  size_t i;
+  uint64_t out = 0;
+  uint8_t tms;
+
+  for (i = 0; i < num_bits; ++i) {
+    uint8_t bit = (value & (1 << i)) ? 1 : 0;
+    if (i == num_bits - 1)
+      tms = 1;
+    else
+      tms = 0;
+
+    uint8_t out_bit = jtag_next(tms, bit) & 1;
+    if (tms)
+      jtag_state++;
+
+    out |= (out_bit << i);
   }
 
-  for (int i = 0; i < numbits; ++i) {
-    jtag_next(0, value);
-  }
-  jtag_soft_reset();
+  *out_value = out;
 }
+
+#define DPACC 0b1010
+static void jtag_write_ir(uint8_t ir)
+{
+  uint64_t out_value = 0;
+
+  jtag_to_state(JTAG_STATE_SHIFT_IR);
+  jtag_shift(ir, &out_value, 4);
+  jtag_to_state(JTAG_STATE_RUN_TEST_IDLE);
+}
+
+#define ACK_OK 0b010
+
+static bool jtag_reg_write(int addr, uint32_t value)
+{
+  uint64_t dap_response;
+  int ack;
+
+  uint64_t dr_value = 0;
+
+  /* Actual register value at [34:3] */
+  dr_value |= ((uint64_t)value) << 3;
+
+  /* A[3:2] of address value at [2:1] */
+  dr_value |= ((addr >> 2) & 3) << 1;
+
+  /* RnW is 0 for WRITE OP */
+
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+  jtag_shift(dr_value, &dap_response, 35);
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+
+  dr_value = ((0xc >> 2) & 3) << 1;
+  dr_value |= 1;
+
+  jtag_shift(dr_value, &dap_response, 35);
+  ack = dap_response & 7;
+
+  return ack == ACK_OK;
+}
+
+#define DAP_REG_ADDR_CTRL_STAT 4
+#define DAP_REG_ADDR_SELECT    8
+
+uint32_t last_select = 0;
+
+static bool jtag_reg_read(int addr, uint32_t *value)
+{
+  uint64_t dap_response;
+  int ack;
+
+  uint64_t dr_value = 0;
+
+  dr_value |= ((addr >> 2) & 3) << 1;
+  dr_value |= 1;
+
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+  jtag_shift(dr_value, &dap_response, 35);
+
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+
+  dr_value = ((0xc >> 2) & 3) << 1;
+  dr_value |= 1;
+  jtag_shift(dr_value, &dap_response, 35);
+  ack = dap_response & 7;
+  if (ack == ACK_OK) {
+    *value = (uint32_t)(dap_response >> 3);
+    return true;
+  }
+
+  return false;
+}
+
+static bool jtag_set_select_reg(int dpbank, int apbank, int apsel)
+{
+  uint64_t select = (dpbank & 0xf)
+    | ((apbank & 0xf) << 4)
+    | ((apsel & 0xf) << 24);
+
+  return jtag_reg_write(DAP_REG_ADDR_SELECT, select);
+}
+
+static bool jtag_read_dpacc_ctr_stat(uint32_t *out)
+{
+  uint32_t v;
+
+  /* WRITE to SELECT */
+  if (!jtag_set_select_reg(0, 0, 0))
+    return false;
+
+  if (!jtag_reg_read(DAP_REG_ADDR_CTRL_STAT, &v))
+    return false;
+
+  *out = v;
+  return true;
+}
+
+static bool jtag_write_dpacc_ctr_stat(uint32_t value)
+{
+  /* WRITE to SELECT */
+  if (!jtag_set_select_reg(0, 0, 0))
+    return false;
+
+  return jtag_reg_write(DAP_REG_ADDR_CTRL_STAT, value);
+}
+
+char testreg[4];
+int testreg_idx = 0;
+
+#define TESTREG_SHIFT(__bit) \
+  testreg[testreg_idx++] = jtag_next(0, __bit); \
+  if (testreg_idx == 4) \
+    testreg_idx = 0; 
+
+#if 0
+  TESTREG_SHIFT(1);
+  TESTREG_SHIFT(1);
+  TESTREG_SHIFT(1);
+  TESTREG_SHIFT(1);
+
+  TESTREG_SHIFT(0);
+  TESTREG_SHIFT(1);
+  TESTREG_SHIFT(0);
+  TESTREG_SHIFT(1);
+
+  TESTREG_SHIFT(0);
+  TESTREG_SHIFT(0);
+  TESTREG_SHIFT(0);
+  TESTREG_SHIFT(1);
+#endif
+
+
+#define CTRL_STAT_CDBGRSTREQ   (1<<26)
+#define CTRL_STAT_CDBGRSTACK   (1<<27)
+#define CTRL_STAT_CDBGPWRUPREQ (1<<28)
+#define CTRL_STAT_CDBGPWRUPACK (1<<29)
+#define CTRL_STAT_CSYSPWRUPREQ (1<<30)
+#define CTRL_STAT_CSYSPWRUPACK (1<<31)
+
+struct dap {
+  uint32_t ctl_stat;
+};
+
+struct dap dap = { 0 };
+
+#define CDBGRSTACK_NUM_REPS 5000
+
+static bool jtag_dap_reset(void)
+{
+  size_t i;
+  const int max_reps = 5000;
+  bool timeout = true;
+
+  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat | CTRL_STAT_CDBGRSTREQ))
+    return false;
+
+  for (i = 0; i < CDBGRSTACK_NUM_REPS; ++i) {
+    if (!jtag_read_dpacc_ctr_stat(&dap.ctl_stat))
+      return false;
+
+    if (dap.ctl_stat & CTRL_STAT_CDBGRSTACK) {
+      timeout = false;
+      break;
+    }
+  }
+
+  if (timeout)
+    return false;
+
+  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat & ~CTRL_STAT_CDBGRSTREQ))
+    return false;
+
+  for (i = 0; i < CDBGRSTACK_NUM_REPS; ++i) {
+    if (!jtag_read_dpacc_ctr_stat(&dap.ctl_stat))
+      return false;
+
+    if (!(dap.ctl_stat & CTRL_STAT_CDBGRSTACK))
+      return true;
+  }
+
+  return false;
+}
+
+static bool jtag_dap_dbg_power_up(void)
+{
+  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat | CTRL_STAT_CDBGPWRUPREQ))
+    return false;
+
+  while (1) {
+    if (!jtag_read_dpacc_ctr_stat(&dap.ctl_stat))
+      return false;
+
+    if (dap.ctl_stat & CTRL_STAT_CDBGPWRUPACK)
+      break;
+  }
+
+  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat | CTRL_STAT_CSYSPWRUPREQ))
+    return false;
+
+  while(1) {
+    if (!jtag_read_dpacc_ctr_stat(&dap.ctl_stat))
+      return false;
+
+    if (dap.ctl_stat & CTRL_STAT_CSYSPWRUPACK)
+      break;
+  }
+  return true;
+}
+
+static bool jtag_dap_dbg_power_down(void)
+{
+  const uint32_t req_mask = CTRL_STAT_CSYSPWRUPREQ;// | CTRL_STAT_CDBGPWRUPREQ;
+  const uint32_t ack_mask = CTRL_STAT_CSYSPWRUPACK;// | CTRL_STAT_CDBGPWRUPACK;
+
+  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat & ~req_mask))
+    return false;
+
+  while (1) {
+    if (!jtag_read_dpacc_ctr_stat(&dap.ctl_stat))
+      return false;
+
+    if (!(dap.ctl_stat & ack_mask))
+      break;
+  }
+
+  return true;
+}
+
+static bool jtag_dap_power_init(void)
+{
+  jtag_write_ir(DPACC);
+
+  if (!jtag_read_dpacc_ctr_stat(&dap.ctl_stat))
+    return false;
+
+  if (!jtag_dap_dbg_power_down())
+    return false;
+
+  if (!jtag_dap_reset())
+    return false;
+
+  if (!jtag_dap_dbg_power_up())
+    return false;
+  
+  return true;
+}
+
+uint64_t ctl_stat = 0;
 
 /* USER CODE END 0 */
 
@@ -576,50 +861,23 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while(vvv);
+  const struct jtag_state_path *p = jtag_get_state_path(JTAG_STATE_EXIT1_DR, JTAG_STATE_EXIT1_IR);
+  if (!p) {
+    vvv = 1;
+  }
   jtag_init();
   jtag_reset();
 
   num_devs = jtag_scan_num_devs();
 
-  jtag_shift_ir();
-  while(1) {
-    do_test_scan(v1, numbits, ir_shift);
-  }
-
-  last_ir = jtag_next(0, 0);
-  last_ir = jtag_next(0, 1);
-  last_ir = jtag_next(0, 1);
-  last_ir = jtag_next(0, 1);
-
-  last_ir = jtag_next(0, 1);
-  last_ir = jtag_next(0, 1);
-  last_ir = jtag_next(0, 1);
-  last_ir = jtag_next(0, 1);
-  last_ir = jtag_next(0, 1);
-
-  /* SHIFT-IR to SHIFT-DR */
-  jtag_tms_seq(0x07, 5);
+  jtag_shift_dr();
 
   for (int i = 0; i < 32; ++i) {
     last_ir = jtag_next(0, 0);
-    idcode = (idcode << 1) | last_ir;
+    idcode |= last_ir << i;
   }
 
-  for (int i = 0; i < 32; ++i) {
-    last_ir = jtag_next(0, 0);
-    idcode2 = (idcode2 << 1) | last_ir;
-  }
-
-  for (int i = 0; i < 50; ++i) {
-    last_ir = jtag_next(0, 1);
-  }
-
-  if (!jtag_next(0, 1)) {
-    while (1);
-  }
-
-  while(1);
-  swd_init();
+  ctl_stat = jtag_dap_power_init();
 
   while (1)
   {
@@ -844,6 +1102,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : JTAG_RTCK_Pin */
+  GPIO_InitStruct.Pin = JTAG_RTCK_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(JTAG_RTCK_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : B1_Pin JTAG_TDO_Pin */
   GPIO_InitStruct.Pin = B1_Pin|JTAG_TDO_Pin;
