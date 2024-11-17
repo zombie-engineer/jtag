@@ -53,6 +53,21 @@ PCD_HandleTypeDef hpcd_USB_FS;
 #define SWD_ACK_WAIT  1
 #define SWD_ACK_FAULT 2
 
+#define DAP_REG_ADDR_CTRL_STAT 4
+#define DAP_REG_ADDR_SELECT    8
+#define DAP_REG_ADDR_RDBUFF    0xc
+#define AP_REG_ADDR_CSW  0x00
+#define AP_REG_ADDR_CFG  0xf4
+#define AP_REG_ADDR_BASE 0xf8
+#define AP_REG_ADDR_IDR  0xfc
+
+#define DP 0
+#define AP 1
+
+#define OP_READ 0
+#define OP_WRITE 1
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -288,13 +303,27 @@ static void jtag_shift(uint64_t value, uint64_t *out_value, size_t num_bits)
 }
 
 #define DPACC 0b1010
+#define APACC 0b1011
+
+struct dap {
+  uint32_t ctl_stat;
+  uint32_t select;
+  uint32_t ir;
+};
+
+struct dap dap = { 0 };
+
 static void jtag_write_ir(uint8_t ir)
 {
   uint64_t out_value = 0;
 
+  if (dap.ir == ir)
+    return;
+
   jtag_to_state(JTAG_STATE_SHIFT_IR);
   jtag_shift(ir, &out_value, 4);
   jtag_to_state(JTAG_STATE_RUN_TEST_IDLE);
+  dap.ir = ir;
 }
 
 #define ACK_OK 0b010
@@ -327,37 +356,6 @@ static bool jtag_reg_write(int addr, uint32_t value)
   return ack == ACK_OK;
 }
 
-#define DAP_REG_ADDR_CTRL_STAT 4
-#define DAP_REG_ADDR_SELECT    8
-
-uint32_t last_select = 0;
-
-static bool jtag_reg_read(int addr, uint32_t *value)
-{
-  uint64_t dap_response;
-  int ack;
-
-  uint64_t dr_value = 0;
-
-  dr_value |= ((addr >> 2) & 3) << 1;
-  dr_value |= 1;
-
-  jtag_to_state(JTAG_STATE_SHIFT_DR);
-  jtag_shift(dr_value, &dap_response, 35);
-
-  jtag_to_state(JTAG_STATE_SHIFT_DR);
-
-  dr_value = ((0xc >> 2) & 3) << 1;
-  dr_value |= 1;
-  jtag_shift(dr_value, &dap_response, 35);
-  ack = dap_response & 7;
-  if (ack == ACK_OK) {
-    *value = (uint32_t)(dap_response >> 3);
-    return true;
-  }
-
-  return false;
-}
 
 static bool jtag_set_select_reg(int dpbank, int apbank, int apsel)
 {
@@ -365,22 +363,92 @@ static bool jtag_set_select_reg(int dpbank, int apbank, int apsel)
     | ((apbank & 0xf) << 4)
     | ((apsel & 0xf) << 24);
 
-  return jtag_reg_write(DAP_REG_ADDR_SELECT, select);
+  if (select == dap.select)
+    return true;
+
+  jtag_write_ir(DPACC);
+
+  if (jtag_reg_write(DAP_REG_ADDR_SELECT, select)) {
+    dap.select = select;
+    return true;
+  }
+
+  return false;
 }
 
-static bool jtag_read_dpacc_ctr_stat(uint32_t *out)
+static void jtag_shift_to_rdbuf(uint64_t *out)
 {
-  uint32_t v;
+  uint64_t dr_value_in;
+  uint64_t dr_value_out;
 
-  /* WRITE to SELECT */
-  if (!jtag_set_select_reg(0, 0, 0))
+  jtag_set_select_reg(0, 0, 0);
+  jtag_write_ir(DPACC);
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+  dr_value_in = ((0xc >> 2) & 3) << 1;
+  dr_value_in |= 1;
+  jtag_shift(dr_value_in, &dr_value_out, 35);
+  *out = dr_value_out;
+}
+
+static bool jtag_adi_io_shift(int op, int addr, uint32_t *value)
+{
+  uint64_t dap_response;
+  int ack;
+
+  uint64_t dr_value = 0;
+
+  dr_value |= ((addr >> 2) & 3) << 1;
+  if (op == OP_READ)
+    dr_value |= 1;
+
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+  jtag_shift(dr_value, &dap_response, 35);
+
+  while(1) {
+    jtag_to_state(JTAG_STATE_SHIFT_DR);
+    jtag_shift(dr_value, &dap_response, 35);
+    // jtag_shift_to_rdbuf(&dap_response);
+    ack = dap_response & 7;
+    if (ack == ACK_OK) {
+      *value = (uint32_t)(dap_response >> 3);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool jtag_adi_io(int type, int op, int reg_addr, uint32_t *out)
+{
+  uint32_t v = 0;
+  int ap_bank = 0;
+  int dp_bank = 0;
+
+  int addr = reg_addr & 0xf;
+  if (type == DP)
+    dp_bank = (reg_addr >> 4) & 0xf;
+  else
+    ap_bank = (reg_addr >> 4) & 0xf;
+
+  if (!jtag_set_select_reg(dp_bank, ap_bank, 0))
     return false;
 
-  if (!jtag_reg_read(DAP_REG_ADDR_CTRL_STAT, &v))
+  if (type == DP)
+    jtag_write_ir(DPACC);
+  else
+    jtag_write_ir(APACC);
+
+  if (!jtag_adi_io_shift(op, addr, &v))
     return false;
 
   *out = v;
   return true;
+}
+
+
+static bool jtag_read_dpacc_ctr_stat(uint32_t *out)
+{
+  return jtag_adi_io(DP, OP_READ, DAP_REG_ADDR_CTRL_STAT, out);
 }
 
 static bool jtag_write_dpacc_ctr_stat(uint32_t value)
@@ -389,6 +457,7 @@ static bool jtag_write_dpacc_ctr_stat(uint32_t value)
   if (!jtag_set_select_reg(0, 0, 0))
     return false;
 
+  jtag_write_ir(DPACC);
   return jtag_reg_write(DAP_REG_ADDR_CTRL_STAT, value);
 }
 
@@ -425,13 +494,13 @@ int testreg_idx = 0;
 #define CTRL_STAT_CSYSPWRUPREQ (1<<30)
 #define CTRL_STAT_CSYSPWRUPACK (1<<31)
 
-struct dap {
-  uint32_t ctl_stat;
-};
-
-struct dap dap = { 0 };
-
 #define CDBGRSTACK_NUM_REPS 5000
+
+static void dap_init(void)
+{
+  dap.select = 0xffffffff;
+  dap.ir = 0xffffffff;
+}
 
 static bool jtag_dap_reset(void)
 {
@@ -499,7 +568,7 @@ static bool jtag_dap_dbg_power_down(void)
   const uint32_t req_mask = CTRL_STAT_CSYSPWRUPREQ;// | CTRL_STAT_CDBGPWRUPREQ;
   const uint32_t ack_mask = CTRL_STAT_CSYSPWRUPACK;// | CTRL_STAT_CDBGPWRUPACK;
 
-  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat & ~req_mask))
+  if (!jtag_write_dpacc_ctr_stat(0))
     return false;
 
   while (1) {
@@ -575,6 +644,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  dap_init();
   jtag_init();
   jtag_reset();
 
@@ -587,7 +657,11 @@ int main(void)
     idcode |= last_ir << i;
   }
 
+  uint32_t reg;
   ctl_stat = jtag_dap_power_init();
+  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_BASE, &reg);
+  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_IDR, &reg);
+  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_CFG, &reg);
 
   while (1)
   {
