@@ -53,10 +53,18 @@ PCD_HandleTypeDef hpcd_USB_FS;
 #define SWD_ACK_WAIT  1
 #define SWD_ACK_FAULT 2
 
-#define DAP_REG_ADDR_CTRL_STAT 4
-#define DAP_REG_ADDR_SELECT    8
-#define DAP_REG_ADDR_RDBUFF    0xc
+#define DP_REG_ADDR_DPIDR     0
+#define DP_REG_ADDR_SELECT    8
+#define DP_REG_ADDR_RDBUFF    0xc
+
+#define DP_REG_ADDR_CTRL_STAT 0x04
+#define DP_REG_ADDR_DLCR      0x14
+#define DP_REG_ADDR_TARGETID  0x24
+#define DP_REG_ADDR_DLPIDR    0x34
+
 #define AP_REG_ADDR_CSW  0x00
+#define AP_REG_ADDR_TAR  0x04
+#define AP_REG_ADDR_DRW  0x0c
 #define AP_REG_ADDR_CFG  0xf4
 #define AP_REG_ADDR_BASE 0xf8
 #define AP_REG_ADDR_IDR  0xfc
@@ -125,7 +133,6 @@ static void MX_USB_PCD_Init(void);
 
 volatile int num_ticks = 0;
 volatile int tdo = 0;
-volatile int rtck = 0;
 
 jtag_state_t jtag_state;
 int jtag_state_errors = 0;
@@ -157,8 +164,11 @@ volatile uint32_t idcode = 0;
 
 #define NUM_TRIES 1000
 
+uint64_t tdo_history2 = 0;
+
 uint8_t jtag_next(uint8_t tms, uint8_t databit)
 {
+  uint8_t tdo_value;
   if (tms)
     TMS_HI();
   else
@@ -169,15 +179,15 @@ uint8_t jtag_next(uint8_t tms, uint8_t databit)
   else
     TDI_LO();
 
+  tdo_value = TDO_READ();
   TCLK_HI();
-  tdo = TDO_READ();
-
-  rtck = RTCK_READ();
-  HAL_Delay(1);
+  HAL_Delay(2);
   TCLK_LO();
-  rtck = RTCK_READ();
+  HAL_Delay(2);
 
-  return tdo != 0;
+  tdo_history2 = (tdo_history2 >> 1) | (((uint64_t)tdo_value) << 63);
+
+  return tdo_value;
 }
 
 void jtag_tms_seq(uint32_t value, size_t len)
@@ -190,8 +200,8 @@ void jtag_tms_seq(uint32_t value, size_t len)
 
 void jtag_soft_reset(void)
 {
-  jtag_tms_seq(0b011111, 6);
-  jtag_state = JTAG_STATE_RUN_TEST_IDLE;
+  jtag_tms_seq(0b11111, 5);
+  jtag_state = JTAG_STATE_TEST_LOGIC_RESET;
 }
 
 bool jtag_to_state(jtag_state_t to)
@@ -283,20 +293,18 @@ static void jtag_shift(uint64_t value, uint64_t *out_value, size_t num_bits)
 {
   size_t i;
   uint64_t out = 0;
+  uint64_t out_bit;
   uint8_t tms;
 
   for (i = 0; i < num_bits; ++i) {
     uint8_t bit = (value & (1 << i)) ? 1 : 0;
-    if (i == num_bits - 1)
-      tms = 1;
-    else
-      tms = 0;
+    tms = (i == num_bits - 1) ? 1: 0;
 
-    uint8_t out_bit = jtag_next(tms, bit) & 1;
+    out_bit = jtag_next(tms, bit) & 1;
     if (tms)
       jtag_state++;
 
-    out |= (out_bit << i);
+    out |= out_bit << i;
   }
 
   *out_value = out;
@@ -306,9 +314,16 @@ static void jtag_shift(uint64_t value, uint64_t *out_value, size_t num_bits)
 #define APACC 0b1011
 
 struct dap {
+  uint32_t idcode;
+  uint32_t target_id;
+  uint32_t dpidr;
+  uint32_t dlpidr;
+  uint32_t base;
+  uint32_t idr;
   uint32_t ctl_stat;
   uint32_t select;
   uint32_t ir;
+  uint32_t rom_table[1024];
 };
 
 struct dap dap = { 0 };
@@ -368,7 +383,7 @@ static bool jtag_set_select_reg(int dpbank, int apbank, int apsel)
 
   jtag_write_ir(DPACC);
 
-  if (jtag_reg_write(DAP_REG_ADDR_SELECT, select)) {
+  if (jtag_reg_write(DP_REG_ADDR_SELECT, select)) {
     dap.select = select;
     return true;
   }
@@ -390,35 +405,50 @@ static void jtag_shift_to_rdbuf(uint64_t *out)
   *out = dr_value_out;
 }
 
-static bool jtag_adi_io_shift(int op, int addr, uint32_t *value)
+#define ADI_READ_BIT (1<<0)
+#define ADI_WRITE_BIT (0<<0)
+#define ADI_ADDR_BITS(__a) (((__a >> 2) & 3) << 1)
+#define ADI_MSG_LEN 35
+#define ADI_RESP_STATUS_MASK 7
+#define ADI_RESP2DATA(__r) (uint32_t)(__r >> 3)
+
+static inline bool jtag_read_rdbuf_resp(uint32_t *out)
 {
   uint64_t dap_response;
+  uint64_t dr_value;
   int ack;
 
-  uint64_t dr_value = 0;
-
-  dr_value |= ((addr >> 2) & 3) << 1;
-  if (op == OP_READ)
-    dr_value |= 1;
-
-  jtag_to_state(JTAG_STATE_SHIFT_DR);
-  jtag_shift(dr_value, &dap_response, 35);
+  jtag_write_ir(DPACC);
+  dr_value = ADI_ADDR_BITS(DP_REG_ADDR_RDBUFF) | ADI_READ_BIT;
 
   while(1) {
     jtag_to_state(JTAG_STATE_SHIFT_DR);
-    jtag_shift(dr_value, &dap_response, 35);
-    // jtag_shift_to_rdbuf(&dap_response);
-    ack = dap_response & 7;
+    jtag_shift(dr_value, &dap_response, ADI_MSG_LEN);
+    ack = dap_response & ADI_RESP_STATUS_MASK;
     if (ack == ACK_OK) {
-      *value = (uint32_t)(dap_response >> 3);
+      *out = ADI_RESP2DATA(dap_response);
       return true;
     }
   }
-
   return false;
 }
 
-static bool jtag_adi_io(int type, int op, int reg_addr, uint32_t *out)
+static bool jtag_adi_io_shift(int op, int addr, uint32_t value_in,
+  uint32_t *value_out)
+{
+  uint64_t dap_response;
+
+  uint64_t dr_value = (op == OP_READ ? ADI_READ_BIT : ADI_WRITE_BIT)
+    | ADI_ADDR_BITS(addr)
+    | (((uint64_t)(op == OP_WRITE ? value_in : 0)) << 3);
+
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+  jtag_shift(dr_value, &dap_response, 35);
+  return jtag_read_rdbuf_resp(value_out);
+}
+
+static bool jtag_adi_io(int type, int op, int reg_addr, uint32_t value_in,
+  uint32_t *value_out)
 {
   uint32_t v = 0;
   int ap_bank = 0;
@@ -438,17 +468,16 @@ static bool jtag_adi_io(int type, int op, int reg_addr, uint32_t *out)
   else
     jtag_write_ir(APACC);
 
-  if (!jtag_adi_io_shift(op, addr, &v))
+  if (!jtag_adi_io_shift(op, addr, value_in, &v))
     return false;
 
-  *out = v;
+  *value_out = v;
   return true;
 }
 
-
 static bool jtag_read_dpacc_ctr_stat(uint32_t *out)
 {
-  return jtag_adi_io(DP, OP_READ, DAP_REG_ADDR_CTRL_STAT, out);
+  return jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, out);
 }
 
 static bool jtag_write_dpacc_ctr_stat(uint32_t value)
@@ -458,34 +487,8 @@ static bool jtag_write_dpacc_ctr_stat(uint32_t value)
     return false;
 
   jtag_write_ir(DPACC);
-  return jtag_reg_write(DAP_REG_ADDR_CTRL_STAT, value);
+  return jtag_reg_write(DP_REG_ADDR_CTRL_STAT, value);
 }
-
-char testreg[4];
-int testreg_idx = 0;
-
-#define TESTREG_SHIFT(__bit) \
-  testreg[testreg_idx++] = jtag_next(0, __bit); \
-  if (testreg_idx == 4) \
-    testreg_idx = 0; 
-
-#if 0
-  TESTREG_SHIFT(1);
-  TESTREG_SHIFT(1);
-  TESTREG_SHIFT(1);
-  TESTREG_SHIFT(1);
-
-  TESTREG_SHIFT(0);
-  TESTREG_SHIFT(1);
-  TESTREG_SHIFT(0);
-  TESTREG_SHIFT(1);
-
-  TESTREG_SHIFT(0);
-  TESTREG_SHIFT(0);
-  TESTREG_SHIFT(0);
-  TESTREG_SHIFT(1);
-#endif
-
 
 #define CTRL_STAT_CDBGRSTREQ   (1<<26)
 #define CTRL_STAT_CDBGRSTACK   (1<<27)
@@ -539,7 +542,8 @@ static bool jtag_dap_reset(void)
 
 static bool jtag_dap_dbg_power_up(void)
 {
-  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat | CTRL_STAT_CDBGPWRUPREQ))
+  if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat |
+    CTRL_STAT_CDBGPWRUPREQ | CTRL_STAT_CSYSPWRUPREQ))
     return false;
 
   while (1) {
@@ -550,6 +554,7 @@ static bool jtag_dap_dbg_power_up(void)
       break;
   }
 
+#if 0
   if (!jtag_write_dpacc_ctr_stat(dap.ctl_stat | CTRL_STAT_CSYSPWRUPREQ))
     return false;
 
@@ -560,6 +565,7 @@ static bool jtag_dap_dbg_power_up(void)
     if (dap.ctl_stat & CTRL_STAT_CSYSPWRUPACK)
       break;
   }
+#endif
   return true;
 }
 
@@ -601,7 +607,16 @@ static bool jtag_dap_power_init(void)
   return true;
 }
 
-uint64_t ctl_stat = 0;
+uint32_t jtag_read_idcode(void)
+{
+  // jtag_shift_ir();
+  jtag_shift_dr();
+  dap.idcode = 0;
+  for (int i = 0; i < 32; ++i) {
+    last_ir = jtag_next(0, 0);
+    dap.idcode |= last_ir << i;
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -648,20 +663,36 @@ int main(void)
   jtag_init();
   jtag_reset();
 
+  // arm_test();
+
   num_devs = jtag_scan_num_devs();
 
-  jtag_shift_dr();
+  jtag_read_idcode();
 
-  for (int i = 0; i < 32; ++i) {
-    last_ir = jtag_next(0, 0);
-    idcode |= last_ir << i;
-  }
-
+  bool success;
   uint32_t reg;
-  ctl_stat = jtag_dap_power_init();
-  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_BASE, &reg);
-  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_IDR, &reg);
-  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_CFG, &reg);
+  success = jtag_dap_power_init();
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_TARGETID, 0, &dap.target_id);
+  success = jtag_adi_io(AP, OP_READ, AP_REG_ADDR_BASE, 0, &dap.base);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_DPIDR, 0, &dap.dpidr);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_DLPIDR, 0, &dap.dlpidr);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  success = jtag_adi_io(AP, OP_READ, AP_REG_ADDR_IDR, 0, &dap.idr);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  success = jtag_adi_io(AP, OP_READ, AP_REG_ADDR_CFG, 0, &reg);
+  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+
+  uint32_t tar_value = 0;
+  uint32_t data;
+
+  for (int i = 0; i < 1024; ++i) {
+    tar_value = dap.base + i * 4;
+    jtag_adi_io(AP, OP_WRITE, AP_REG_ADDR_TAR, tar_value, &data);
+    jtag_adi_io(AP, OP_READ, AP_REG_ADDR_DRW, 0, &dap.rom_table[i]);
+  }
 
   while (1)
   {

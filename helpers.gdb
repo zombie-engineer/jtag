@@ -39,7 +39,7 @@ define tdi_hi
 end
 
 define tdo_get
-  set $__v = JTAG_TDO_GPIO_Port.IDR & JTAG_TDO_Pin
+  set $__v = (JTAG_TDO_GPIO_Port.IDR & JTAG_TDO_Pin) >> 3
   printf "TDO %x\n", $__v
 end
 
@@ -69,6 +69,10 @@ define jtag_clock_bit
   rtck_get
 end
 
+define tg
+  tdo_get
+end
+
 define jtag_clock_bits
   set $__v = $arg0
   set $__nr = $arg1
@@ -79,3 +83,6 @@ define jtag_clock_bits
     printf "%08x\n", $__v
   end
 end
+
+displ 1 & (JTAG_TDO_GPIO_Port.IDR >> 3)
+displ/t tdo_history2
