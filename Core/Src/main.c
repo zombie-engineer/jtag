@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include <stdbool.h>
 #include "jtag_state.h"
+#include "cmsis_arch_id.h"
+#include "cmsis_edi.h"
 
 /* USER CODE END Includes */
 
@@ -65,6 +67,7 @@ PCD_HandleTypeDef hpcd_USB_FS;
 #define AP_REG_ADDR_CSW  0x00
 #define AP_REG_ADDR_TAR  0x04
 #define AP_REG_ADDR_DRW  0x0c
+#define AP_REG_ADDR_BD0  0x10
 #define AP_REG_ADDR_CFG  0xf4
 #define AP_REG_ADDR_BASE 0xf8
 #define AP_REG_ADDR_IDR  0xfc
@@ -74,6 +77,30 @@ PCD_HandleTypeDef hpcd_USB_FS;
 
 #define OP_READ 0
 #define OP_WRITE 1
+
+#define CMSIS_REG_ITCTRL       0xf00
+#define CMSIS_REG_CLAIMSET     0xfa0
+#define CMSIS_REG_CLAIMCLR     0xfa4
+#define CMSIS_REG_DEVAFF0      0xfa8
+#define CMSIS_REG_DEVAFF1      0xfac
+#define CMSIS_REG_LAR          0xfb0
+#define CMSIS_REG_LSR          0xfb4
+#define CMSIS_REG_AUTHSTATUS   0xfb8
+#define CMSIS_REG_DEVARCH      0xfbc
+#define CMSIS_REG_DEVID        0xfc8
+#define CMSIS_REG_DEVTYPE      0xfcc
+#define CMSIS_REG_PIDR4        0xfd0
+#define CMSIS_REG_PIDR5        0xfd4
+#define CMSIS_REG_PIDR6        0xfd8
+#define CMSIS_REG_PIDR7        0xfdc
+#define CMSIS_REG_PIDR0        0xfe0
+#define CMSIS_REG_PIDR1        0xfe4
+#define CMSIS_REG_PIDR2        0xfe8
+#define CMSIS_REG_PIDR3        0xfec
+#define CMSIS_REG_CIDR0        0xff0
+#define CMSIS_REG_CIDR1        0xff4
+#define CMSIS_REG_CIDR2        0xff8
+#define CMSIS_REG_CIDR3        0xffc
 
 
 /* USER CODE END PV */
@@ -181,9 +208,7 @@ uint8_t jtag_next(uint8_t tms, uint8_t databit)
 
   tdo_value = TDO_READ();
   TCLK_HI();
-  HAL_Delay(2);
   TCLK_LO();
-  HAL_Delay(2);
 
   tdo_history2 = (tdo_history2 >> 1) | (((uint64_t)tdo_value) << 63);
 
@@ -261,7 +286,7 @@ int irlen1 = 4;
 
 static int jtag_scan_num_devs(void)
 {
-  int num_devs;
+  __attribute__((unused)) int num_devs;
   size_t i;
   size_t irchain_len = 4;
 
@@ -289,6 +314,8 @@ static int jtag_scan_num_devs(void)
   return num_devs;
 }
 
+volatile int vvv = 1;
+
 static void jtag_shift(uint64_t value, uint64_t *out_value, size_t num_bits)
 {
   size_t i;
@@ -297,7 +324,12 @@ static void jtag_shift(uint64_t value, uint64_t *out_value, size_t num_bits)
   uint8_t tms;
 
   for (i = 0; i < num_bits; ++i) {
-    uint8_t bit = (value & (1 << i)) ? 1 : 0;
+    uint8_t bit;
+    if (vvv)
+      bit = (value >> i) & 1;
+    else
+      bit = (value & (1<<i)) ? 1 : 0;
+
     tms = (i == num_bits - 1) ? 1: 0;
 
     out_bit = jtag_next(tms, bit) & 1;
@@ -323,10 +355,56 @@ struct dap {
   uint32_t ctl_stat;
   uint32_t select;
   uint32_t ir;
+  uint32_t csw;
   uint32_t rom_table[1024];
 };
 
+struct cmsis_regs {
+  uint32_t cdbgpwrupreq;
+  uint32_t cdbgpwrupack;
+  uint32_t itctrl;
+  uint32_t claimset;
+  uint32_t claimclr;
+  uint32_t devaff0;
+  uint32_t devaff1;
+  uint32_t lar;
+  uint32_t lsr;
+  uint32_t authstatus;
+  uint32_t devarch;
+  uint32_t devid;
+  uint32_t devtype;
+  uint32_t pidr4;
+  uint32_t pidr5;
+  uint32_t pidr6;
+  uint32_t pidr7;
+  uint32_t pidr0;
+  uint32_t pidr1;
+  uint32_t pidr2;
+  uint32_t pidr3;
+  uint32_t cidr0;
+  uint32_t cidr1;
+  uint32_t cidr2;
+  uint32_t cidr3;
+};
+
+struct component_hdr {
+  uint32_t memtype;
+  uint32_t pidr4;
+  uint32_t pidr5;
+  uint32_t pidr6;
+  uint32_t pidr7;
+  uint32_t pidr0;
+  uint32_t pidr1;
+  uint32_t pidr2;
+  uint32_t pidr3;
+  uint32_t cidr0;
+  uint32_t cidr1;
+  uint32_t cidr2;
+  uint32_t cidr3;
+};
+
 struct dap dap = { 0 };
+struct component_hdr h;
 
 static void jtag_write_ir(uint8_t ir)
 {
@@ -389,20 +467,6 @@ static bool jtag_set_select_reg(int dpbank, int apbank, int apsel)
   }
 
   return false;
-}
-
-static void jtag_shift_to_rdbuf(uint64_t *out)
-{
-  uint64_t dr_value_in;
-  uint64_t dr_value_out;
-
-  jtag_set_select_reg(0, 0, 0);
-  jtag_write_ir(DPACC);
-  jtag_to_state(JTAG_STATE_SHIFT_DR);
-  dr_value_in = ((0xc >> 2) & 3) << 1;
-  dr_value_in |= 1;
-  jtag_shift(dr_value_in, &dr_value_out, 35);
-  *out = dr_value_out;
 }
 
 #define ADI_READ_BIT (1<<0)
@@ -571,7 +635,6 @@ static bool jtag_dap_dbg_power_up(void)
 
 static bool jtag_dap_dbg_power_down(void)
 {
-  const uint32_t req_mask = CTRL_STAT_CSYSPWRUPREQ;// | CTRL_STAT_CDBGPWRUPREQ;
   const uint32_t ack_mask = CTRL_STAT_CSYSPWRUPACK;// | CTRL_STAT_CDBGPWRUPACK;
 
   if (!jtag_write_dpacc_ctr_stat(0))
@@ -607,7 +670,7 @@ static bool jtag_dap_power_init(void)
   return true;
 }
 
-uint32_t jtag_read_idcode(void)
+void jtag_read_idcode(void)
 {
   // jtag_shift_ir();
   jtag_shift_dr();
@@ -618,6 +681,414 @@ uint32_t jtag_read_idcode(void)
   }
 }
 
+bool last_success = true;
+
+void write_word(uint32_t addr, uint32_t value)
+{
+  uint32_t data = 0;
+  jtag_adi_io(AP, OP_WRITE, AP_REG_ADDR_TAR, addr, &data);
+  jtag_adi_io(AP, OP_WRITE, AP_REG_ADDR_DRW, value, &data);
+  jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  if (dap.ctl_stat & 0x20) {
+    jtag_adi_io(DP, OP_WRITE, DP_REG_ADDR_CTRL_STAT, dap.ctl_stat, &data);
+    jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+    last_success = false;
+  }
+  else
+    last_success = true;
+}
+
+void read_word(uint32_t addr, uint32_t *out)
+{
+  uint32_t data = 0;
+  uint32_t check_tar = 0;
+  jtag_adi_io(AP, OP_WRITE, AP_REG_ADDR_TAR, addr & 0xfffffff0, &data);
+  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_TAR, 0, &check_tar);
+  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_BD0 | (addr & 0xc), 0, out);
+  jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  if (dap.ctl_stat & 0x20) {
+    last_success = false;
+    jtag_adi_io(DP, OP_WRITE, DP_REG_ADDR_CTRL_STAT, dap.ctl_stat, &data);
+    jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  }
+  else
+    last_success = true;
+}
+
+uint32_t last_data = 0;
+int last_j = 0;
+struct cmsis_regs cmsis = { 0 };
+
+struct ext_debug_if {
+  uint32_t edlsr;
+  uint32_t edesr;
+  uint32_t edecr;
+  uint32_t edwar_lo;
+  uint32_t edwar_hi;
+  uint32_t debugtrrx_el0;
+  uint32_t editr;
+  uint32_t edscr;
+  uint32_t debugtrtx_el0;
+  uint32_t edrcr;
+  uint32_t edacr;
+  uint32_t edeccr;
+
+  /* Program counter sampling register */
+  uint32_t edpcsr_lo;
+  uint32_t edcidsr;
+  uint32_t edvidsr;
+  uint32_t edpcsr_hi;
+  uint32_t oslar_el1;
+  uint32_t edprcr;
+  uint32_t edprsr;
+  uint32_t midr_el1;
+  uint32_t edpfr_lo;
+  uint32_t edpfr_hi;
+  uint32_t eddfr_lo;
+  uint32_t eddfr_hi;
+  uint32_t memfeature0;
+  uint32_t memfeature1;
+};
+
+struct per_core_debug {
+  uint32_t debug;
+  uint32_t cti;
+  uint32_t pmu;
+  uint32_t etm;
+  bool debug_exists;
+  bool cti_exists;
+  bool pmu_exists;
+  bool etm_exists;
+  struct ext_debug_if edi;
+};
+
+struct per_core_debug all_cores_debug[4] = { 0 };
+
+static inline void cmsis_read_regs(uint32_t baseaddr)
+{
+  read_word(baseaddr + CMSIS_REG_DEVARCH, &cmsis.devarch);
+  read_word(baseaddr + CMSIS_REG_DEVID, &cmsis.devid);
+  read_word(baseaddr + CMSIS_REG_DEVTYPE, &cmsis.devtype);
+  read_word(baseaddr + CMSIS_REG_DEVAFF0, &cmsis.devaff0);
+  read_word(baseaddr + CMSIS_REG_DEVAFF1, &cmsis.devaff1);
+  read_word(baseaddr + CMSIS_REG_AUTHSTATUS, &cmsis.authstatus);
+}
+
+void core_debug_init(uint32_t baseaddr, struct ext_debug_if *edi)
+{
+  /*
+   * Unlock Debug lock, to verify - readback the value in EDPRSR.OSLK, with 0
+   * as UNLOCKED. Only after OSLK unlock the rest of the debug registers can
+   * be accessed in predictable expected way.
+   */
+  write_word(baseaddr + DBG_REG_ADDR_OSLAR_EL1, 0);
+  read_word(baseaddr + DBG_REG_ADDR_OSLAR_EL1, &edi->oslar_el1);
+  read_word(baseaddr + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
+  read_word(baseaddr + DBG_REG_ADDR_EDSCR, &edi->edscr);
+
+  /*
+   * Contents of EDLSR show if software lock is implemented and se
+   */
+  read_word(baseaddr + DBG_REG_ADDR_EDLSR, &edi->edlsr);
+
+  read_word(baseaddr + DBG_REG_ADDR_EDESR, &edi->edesr);
+  read_word(baseaddr + DBG_REG_ADDR_EDECR, &edi->edecr);
+  write_word(baseaddr + DBG_REG_ADDR_EDECR, 3);
+  read_word(baseaddr + DBG_REG_ADDR_EDESR, &edi->edesr);
+  read_word(baseaddr + DBG_REG_ADDR_EDECR, &edi->edecr);
+
+  read_word(baseaddr + DBG_REG_ADDR_EDWAR0, &edi->edwar_lo);
+  read_word(baseaddr + DBG_REG_ADDR_EDWAR1, &edi->edwar_hi);
+  read_word(baseaddr + DBG_REG_ADDR_DBGDTRRX_EL0, &edi->debugtrrx_el0);
+  read_word(baseaddr + DBG_REG_ADDR_EDITR, &edi->editr);
+  read_word(baseaddr + DBG_REG_ADDR_EDSCR, &edi->edscr);
+  read_word(baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &edi->debugtrtx_el0);
+  read_word(baseaddr + DBG_REG_ADDR_EDRCR, &edi->edrcr);
+  read_word(baseaddr + DBG_REG_ADDR_EDACR, &edi->edacr);
+  read_word(baseaddr + DBG_REG_ADDR_EDECCR, &edi->edacr);
+  read_word(baseaddr + DBG_REG_ADDR_EDPCSR_LO, &edi->edpcsr_lo);
+  read_word(baseaddr + DBG_REG_ADDR_EDCIDSR, &edi->edcidsr);
+  read_word(baseaddr + DBG_REG_ADDR_EDVIDSR, &edi->edvidsr);
+  read_word(baseaddr + DBG_REG_ADDR_EDPCSR_HI, &edi->edpcsr_hi);
+
+  read_word(baseaddr + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
+  read_word(baseaddr + DBG_REG_ADDR_EDPRCR, &edi->edprcr);
+  read_word(baseaddr + DBG_REG_ADDR_MIDR_EL1, &edi->midr_el1);
+  read_word(baseaddr + DBG_REG_ADDR_EDPFR_LO, &edi->edpfr_lo);
+  read_word(baseaddr + DBG_REG_ADDR_EDPFR_HI, &edi->edpfr_hi);
+  read_word(baseaddr + DBG_REG_ADDR_EDDFR_LO, &edi->eddfr_lo);
+  read_word(baseaddr + DBG_REG_ADDR_EDDFR_HI, &edi->eddfr_hi);
+  read_word(baseaddr + 0xd38, &edi->memfeature0);
+  read_word(baseaddr + 0xd3c, &edi->memfeature1);
+}
+
+void cmsis_process_mem_ap_block(uint32_t baseaddr)
+{
+  int core_idx;
+  int arch_id;
+
+  cmsis_read_regs(baseaddr);
+
+  core_idx = cmsis.devaff0 & 0xf;
+  arch_id = cmsis.devarch & 0xffff;
+
+  if (arch_id == CMSIS_ARCH_ID_PROCESSOR_DEBUG_V8_0_A) {
+    all_cores_debug[core_idx].debug = baseaddr;
+    all_cores_debug[core_idx].debug_exists = true;
+  } else if (arch_id == CMSIS_ARCH_ID_CTI) {
+    all_cores_debug[core_idx].cti = baseaddr;
+    all_cores_debug[core_idx].cti_exists = true;
+  } else if (arch_id == CMSIS_ARCH_ID_PMU) {
+    all_cores_debug[core_idx].pmu = baseaddr;
+    all_cores_debug[core_idx].pmu_exists = true;
+  } else if (arch_id == CMSIS_ARCH_ID_ETM) {
+    all_cores_debug[core_idx].etm = baseaddr;
+    all_cores_debug[core_idx].etm_exists = true;
+  }
+  // read_word(baseaddr + 0x314, &reg0);
+  //read_word(baseaddr + 0x088, &reg1);
+}
+
+void jtag_parse_rom(uint32_t rom_addr)
+{
+  int i;
+  uint32_t mem_addr;
+  uint32_t *dst = (uint32_t *)&h;
+  uint32_t rom_entry;
+
+  for (i = 0; i < 13; ++i)
+    read_word(rom_addr + 0xfcc + i * 4, dst++);
+
+  for (i = 0; i < 1024 - 13; ++i) {
+    read_word(rom_addr + i * 4, &dap.rom_table[i]);
+    if (!dap.rom_table[i])
+      break;
+  }
+
+  for (i = 0; i < 1024 - 13; ++i) {
+    rom_entry = dap.rom_table[i];
+    if (!rom_entry)
+      break;
+
+    mem_addr = rom_addr + (rom_entry & 0xfffff000);
+    cmsis_process_mem_ap_block(mem_addr);
+  }
+
+}
+
+#define CTICONTROL  0x00
+#define CTIINTACK   0x10
+#define CTIAPPSET   0x14
+#define CTIAPPCLEAR 0x18
+#define CTIAPPPULSE 0x1c
+#define CTIINEN0    0x20
+#define CTIINEN1    0x24
+#define CTIINEN2    0x28
+#define CTIINEN3    0x2c
+#define CTIINEN4    0x30
+#define CTIINEN5    0x34
+#define CTIINEN6    0x38
+#define CTIINEN7    0x3c
+#define CTIINEN8    0x40
+#define CTIINEN9    0x44
+#define CTIINEN10   0x48
+#define CTIINEN11   0x4c
+#define CTIINEN12   0x50
+#define CTIINEN13   0x54
+#define CTIINEN14   0x58
+#define CTIINEN15   0x5c
+#define CTIINEN16   0x60
+#define CTIINEN17   0x64
+#define CTIINEN18   0x68
+#define CTIINEN19   0x6c
+#define CTIINEN20   0x70
+#define CTIINEN21   0x74
+#define CTIINEN22   0x78
+#define CTIINEN23   0x7c
+#define CTIINEN24   0x80
+#define CTIINEN25   0x84
+#define CTIINEN26   0x88
+#define CTIINEN27   0x8c
+#define CTIINEN28   0x90
+#define CTIINEN29   0x94
+#define CTIINEN30   0x98
+#define CTIINEN31   0x9c
+#define CTIOUTEN0   0xa0
+#define CTIOUTEN1   0xa4
+#define CTIOUTEN2   0xa8
+#define CTIOUTEN3   0xac
+#define CTIOUTEN4   0xb0
+#define CTIOUTEN5   0xb4
+#define CTIOUTEN6   0xb8
+#define CTIOUTEN7   0xbc
+#define CTIOUTEN8   0xc0
+#define CTIOUTEN9   0xc4
+#define CTIOUTEN10  0xc8
+#define CTIOUTEN11  0xcc
+#define CTIOUTEN12  0xd0
+#define CTIOUTEN13  0xd4
+#define CTIOUTEN14  0xd8
+#define CTIOUTEN15  0xdc
+#define CTIOUTEN16  0xe0
+#define CTIOUTEN17  0xe4
+#define CTIOUTEN18  0xe8
+#define CTIOUTEN19  0xec
+#define CTIOUTEN20  0xf0
+#define CTIOUTEN21  0xf4
+#define CTIOUTEN22  0xf8
+#define CTIOUTEN23  0xfc
+#define CTIOUTEN24  0x100
+#define CTIOUTEN25  0x104
+#define CTIOUTEN26  0x108
+#define CTIOUTEN27  0x10c
+#define CTIOUTEN28  0x110
+#define CTIOUTEN29  0x114
+#define CTIOUTEN30  0x118
+#define CTIOUTEN31  0x11c
+#define CTITRIGINSTATUS 0x130
+#define CTITRIGOUTSTATUS 0x134
+#define CTICHINSTATUS 0x138
+#define CTICHOUTSTATUS 0x13c
+#define CTIGATE 0x140
+#define ASICCTL 0x144
+
+uint32_t all_cti[4096/4];
+#define CTI_EVENT_HALT 0
+#define CTI_EVENT_RESUME 1
+
+void aarch64_cti_init(struct per_core_debug *d)
+{
+  uint32_t reg = 0;
+  read_word(d->debug + DBG_REG_ADDR_EDSCR, &d->edi.edscr);
+  /* Enable CTI multiplexing */
+  write_word(d->cti + CTICONTROL, 1);
+  read_word(d->cti + CTICONTROL, &reg);
+  write_word(d->cti + CTIGATE, 0);
+  write_word(d->cti + CTIOUTEN0, 1 << CTI_EVENT_HALT);
+  write_word(d->cti + CTIOUTEN1, 1 << CTI_EVENT_RESUME);
+}
+
+void cmsis_cti_halt(struct per_core_debug *d)
+{
+  struct ext_debug_if *edi = &d->edi;
+
+  read_word(d->debug + DBG_REG_ADDR_EDESR, &edi->edesr);
+  read_word(d->debug + DBG_REG_ADDR_EDECR, &edi->edecr);
+  read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+  write_word(d->debug + DBG_REG_ADDR_EDSCR, edi->edscr | (1<<14));
+  read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+  /* HALT */
+  write_word(d->cti + CTIAPPPULSE, 1 << CTI_EVENT_HALT);
+  while(1) {
+    read_word(d->debug + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
+    if ((edi->edprsr >> 4) & 1)
+      break;
+  }
+
+  read_word(d->debug + DBG_REG_ADDR_EDESR, &edi->edesr);
+  read_word(d->debug + DBG_REG_ADDR_EDECR, &edi->edecr);
+  read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+  if (edi->edscr & (1<<6)) {
+    write_word(d->debug + DBG_REG_ADDR_EDRCR, (1<<2)|(1<<3));
+    read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+  }
+}
+
+static void cti_mod_channel_bits(struct per_core_debug *d, uint32_t reg,
+  uint32_t mask, uint32_t value)
+{
+  uint32_t tmp = 0;
+  read_word(d->cti+ reg, &tmp);
+  tmp &= ~mask;
+  tmp |= value & mask;
+  write_word(d->cti+ reg, tmp);
+}
+
+void cti_gate_channel(struct per_core_debug *d, int channel)
+{
+  cti_mod_channel_bits(d, CTIGATE, 1 << channel, 0);
+}
+
+void cti_ungate_channel(struct per_core_debug *d, int channel)
+{
+  cti_mod_channel_bits(d, CTIGATE, 1 << channel, 0xffffffff);
+}
+
+void cmsis_cti_resume(struct per_core_debug *d)
+{
+  uint32_t reg = 0;
+  struct ext_debug_if *edi = &d->edi;
+
+  read_word(d->debug + DBG_REG_ADDR_EDESR, &edi->edesr);
+  read_word(d->debug + DBG_REG_ADDR_EDECR, &edi->edecr);
+  read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+  write_word(d->debug + DBG_REG_ADDR_EDSCR, edi->edscr | (1<<14));
+  read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+
+  /* RESUME */
+  cti_ungate_channel(d, 1);
+  cti_gate_channel(d, 0);
+  read_word(d->debug + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
+
+  read_word(d->cti + CTITRIGINSTATUS, &reg);
+  read_word(d->cti + CTITRIGOUTSTATUS, &reg);
+  write_word(d->cti + CTIINTACK, 1);
+  read_word(d->cti + CTITRIGOUTSTATUS, &reg);
+
+  read_word(d->cti + CTITRIGOUTSTATUS, &reg);
+  write_word(d->cti + CTIAPPPULSE, 1<<1);
+  read_word(d->cti + CTITRIGOUTSTATUS, &reg);
+
+  while(1) {
+    read_word(d->debug + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
+    read_word(d->debug + DBG_REG_ADDR_EDESR, &edi->edesr);
+    read_word(d->debug + DBG_REG_ADDR_EDECR, &edi->edecr);
+    read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+    if (((edi->edprsr >> 4) & 1) == 0)
+      break;
+  }
+
+  read_word(d->debug + DBG_REG_ADDR_EDESR, &edi->edesr);
+  read_word(d->debug + DBG_REG_ADDR_EDECR, &edi->edecr);
+  read_word(d->debug + DBG_REG_ADDR_EDSCR, &edi->edscr);
+}
+
+void cmsis_read_mem(struct per_core_debug *d, uint64_t memaddr, uint64_t *out)
+{
+}
+
+void cmsis_init_dap(void)
+{
+  int i;
+
+  all_cores_debug[0].cti = 0x80018000;
+  all_cores_debug[1].cti = 0x80019000;
+  all_cores_debug[2].cti = 0x8001a000;
+  all_cores_debug[3].cti = 0x8001b000;
+
+  for (i = 0; i < 4; ++i)
+    core_debug_init(all_cores_debug[i].debug, &all_cores_debug[i].edi);
+
+  aarch64_cti_init(&all_cores_debug[0]);
+  while(1) {
+    cmsis_cti_halt(&all_cores_debug[0]);
+    cmsis_cti_resume(&all_cores_debug[0]);
+  }
+}
+
+static void mem_ap_init(void)
+{
+  jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_CSW, 0, &dap.csw);
+  jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  jtag_adi_io(AP, OP_WRITE, AP_REG_ADDR_CSW,  dap.csw | 0xffffffff, &dap.csw);
+  jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+  jtag_adi_io(AP, OP_READ, AP_REG_ADDR_CSW, 0, &dap.csw);
+  jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
+
+}
+
+
 /* USER CODE END 0 */
 
 /**
@@ -626,7 +1097,7 @@ uint32_t jtag_read_idcode(void)
   */
 int main(void)
 {
-  int num_devs = 0;
+  __attribute__((unused)) int num_devs = 0;
 
   /* USER CODE BEGIN 1 */
 
@@ -669,30 +1140,26 @@ int main(void)
 
   jtag_read_idcode();
 
-  bool success;
+  __attribute__((unused)) bool success;
   uint32_t reg;
   success = jtag_dap_power_init();
   success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_TARGETID, 0, &dap.target_id);
   success = jtag_adi_io(AP, OP_READ, AP_REG_ADDR_BASE, 0, &dap.base);
   success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_DPIDR, 0, &dap.dpidr);
   success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
-  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
   success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_DLPIDR, 0, &dap.dlpidr);
-  success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
   success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
   success = jtag_adi_io(AP, OP_READ, AP_REG_ADDR_IDR, 0, &dap.idr);
   success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
   success = jtag_adi_io(AP, OP_READ, AP_REG_ADDR_CFG, 0, &reg);
   success = jtag_adi_io(DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &dap.ctl_stat);
 
-  uint32_t tar_value = 0;
-  uint32_t data;
+  mem_ap_init();
+  jtag_parse_rom(dap.base);
+  cmsis_init_dap();
 
-  for (int i = 0; i < 1024; ++i) {
-    tar_value = dap.base + i * 4;
-    jtag_adi_io(AP, OP_WRITE, AP_REG_ADDR_TAR, tar_value, &data);
-    jtag_adi_io(AP, OP_READ, AP_REG_ADDR_DRW, 0, &dap.rom_table[i]);
-  }
+#define ARRAY_SIZE(_a) (sizeof(_a)/sizeof(_a[0]))
+
 
   while (1)
   {
