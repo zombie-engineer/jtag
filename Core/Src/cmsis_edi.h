@@ -24,4 +24,5 @@
 #define DBG_REG_ADDR_EDPFR_HI     0xd24
 #define DBG_REG_ADDR_EDDFR_LO     0xd28
 #define DBG_REG_ADDR_EDDFR_HI     0xd2c
+#define DBG_REG_ADDR_EDLAR        0xfb0
 #define DBG_REG_ADDR_EDLSR        0xfb4

@@ -1,0 +1,8 @@
+To halt a single PE, set:
+1. CTIGATE[0] to 0, so that the CTI does not pass channel events on internal channel 0 to the CTM.
+2. CTIOUTEN0[0] to 1, so that the CTI generates a Debug request trigger event in response to a channel event on channel 0.
+
+Note
+The Cross-halt trigger event is input trigger 0, meaning it is controlled by the instance of CTIOUTEN<n> for which <n> is 0.
+3. CTIAPPPULSE[0] to 1, to generate a channel event on channel 0.
+When the PE has entered Debug state, clear the Debug request trigger event by writing 1 to CTIINTACK[0], before restarting the PE.
