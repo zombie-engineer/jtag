@@ -15,6 +15,9 @@ struct target_core {
   bool cti_exists;
   bool pmu_exists;
   bool etm_exists;
+
+  bool halted;
+  bool memory_mode;
 };
 
 struct target {

@@ -9,18 +9,39 @@
 #define ADIV5_MAX_ROM_ENTRIES 32
 #define ARRAY_SIZE(_a) (sizeof(_a)/sizeof(_a[0]))
 
+bool target_core_halt(struct adiv5_dap *d, struct target_core *c)
+{
+  bool success = target_arm_halt(d, &c->edi, c->debug, c->cti);
+
+  if (success)
+    c->halted = true;
+
+  return success;
+}
+
+bool target_core_resume(struct adiv5_dap *d, struct target_core *c)
+{
+  bool success;
+
+  if (!c->halted)
+    return false;
+
+  success = target_arm_resume(d, &c->edi, c->debug, c->cti);
+  if (success)
+    c->halted = false;
+
+  return success;
+}
+
 bool target_halt(struct target *t)
 {
-  return target_arm_halt(&t->dap, &t->core[0].edi, t->core[0].debug,
-    t->core[0].cti);
+  return target_core_halt(&t->dap, &t->core[0]);
 }
 
 bool target_resume(struct target *t)
 {
-  return target_arm_resume(&t->dap, &t->core[0].edi, t->core[0].debug,
-    t->core[0].cti);
+  return target_core_resume(&t->dap, &t->core[0]);
 }
-
 
 static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)
 {
@@ -74,9 +95,13 @@ static void target_parse_rom(struct target *t)
   }
 }
 
-bool target_exec_instr(struct target *t, uint32_t instr)
+bool target_core_exec(struct adiv5_dap *d, struct target_core *c,
+  uint32_t instr)
 {
-  target_arm_exec_instr(&t->dap, &t->core[0].edi, t->core[0].debug, instr);
+  if (!c->halted)
+    return false;
+
+  return target_arm_exec(d, &c->edi, c->debug, instr);
 }
 
 void raspberrypi_soft_reset(struct target *t)
@@ -111,7 +136,7 @@ void raspberrypi_soft_reset(struct target *t)
   };
 
   for (i = 0; i < ARRAY_SIZE(instructions); ++i)
-    target_exec_instr(t, instructions[i]);
+    target_core_exec(&t->dap, &t->core[0], instructions[i]);
 }
 
 bool target_init(struct target *t)

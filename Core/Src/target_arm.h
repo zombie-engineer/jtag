@@ -51,5 +51,5 @@ bool target_arm_resume(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
 void target_arm_mess(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
   uint32_t baseaddr, uint32_t cti_baseaddr);
 
-void target_arm_exec_instr(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
+bool target_arm_exec(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
   uint32_t baseaddr, uint32_t instr);
