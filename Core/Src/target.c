@@ -4,184 +4,23 @@
 #include "cmsis_edi.h"
 #include "arm_cmsis.h"
 #include "target_arm.h"
-#include "arm_cti.h"
 #include "cmsis_arch_id.h"
 
-void target_set_memory_mode(struct target *t)
-{
-  uint32_t base = t->core[0].debug;
-  struct ext_dbg_aarch64 *edi = &t->core[0].edi;
-  
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDSCR, edi->edscr | (1 << 20));
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-}
-
-void target_set_normal_mode(struct target *t)
-{
-  uint32_t base = t->core[0].debug;
-  struct ext_dbg_aarch64 *edi = &t->core[0].edi;
-
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDSCR, edi->edscr & ~(1 << 20));
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-}
-
-void target_halt(struct target *t)
-{
-  uint32_t base = t->core[0].debug;
-  struct ext_dbg_aarch64 *edi = &t->core[0].edi;
-
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDESR, &edi->edesr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDECR, &edi->edecr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDSCR, edi->edscr | (1<<14));
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-
-  /* HALT */
-  cti_pulse_event(&t->dap, t->core[0].cti, CTI_EVENT_HALT);
-  while(1) {
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-    if ((edi->edprsr >> 4) & 1)
-      break;
-  }
-
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDESR, &edi->edesr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDECR, &edi->edecr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  if (edi->edscr & (1<<6)) {
-    adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDRCR, (1<<2)|(1<<3));
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  }
-}
-
-void target_resume(struct target *t)
-{
-  struct ext_dbg_aarch64 *edi = &t->core[0].edi;
-  uint32_t base = t->core[0].debug;
-
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDESR, &edi->edesr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDECR, &edi->edecr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDSCR, edi->edscr | (1<<14));
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-
-  /* RESUME */
-  cti_ungate_channel(&t->dap, t->core[0].cti, 1);
-  cti_gate_channel(&t->dap, t->core[0].cti, 0);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-  cti_ack(&t->dap, t->core[0].cti);
-
-  while(1) {
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDESR, &edi->edesr);
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDECR, &edi->edecr);
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-    if (((edi->edprsr >> 4) & 1) == 0)
-      break;
-  }
-
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDESR, &edi->edesr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDECR, &edi->edecr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-}
-
-void target_read(struct target *t)
-{
-  uint32_t reg = 0;
-  struct ext_dbg_aarch64 *edi = &t->core[0].edi;
-  uint32_t base = t->core[0].debug;
-
-#if 0
-  adiv5_transfer(AP, OP_READ, AP_REG_ADDR_CSW, 0, &dap.csw);
-  dap.csw &= ~(3<<4);
-  dap.csw &= ~7;
-  dap.csw |= 3;
-  adiv5_transfer(AP, OP_WRITE, AP_REG_ADDR_CSW, dap.csw, &dap.csw);
-  adiv5_transfer(AP, OP_READ, AP_REG_ADDR_CSW, 0, &dap.csw);
-
-  adiv5_mem_ap_write_word(base + DBG_REG_ADDR_EDLAR, 0xc5acce55);
-#endif
-  target_set_normal_mode(t);
-  // adiv5_mem_ap_write_word(base + DBG_REG_ADDR_EDITR, 0xd2a00100);
-
-  /* mrs x0, dlr_el0 */
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDITR, 0xd53b4520);
-
-  /* msr dbgdtrtx_el0, x0 */
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDITR, 0xd5130500);
-
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_DBGDTRTX_EL0, &reg);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-
-  /* add x0, x0, #4 */
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDITR, 0x91001000);
-
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-  /* msr dlr_el0, x0 */
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDITR, 0xd51b4520);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-
-  return;
-  // adiv5_mem_ap_write_word(base + DBG_REG_ADDR_EDITR, 0xd5130500);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-  target_set_memory_mode(t);
-
-  while(1) {
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_DBGDTRTX_EL0, &reg);
-    if (reg == 0xd518c000) {
-    }
-  }
-
-
-  /*
-   * reg = *DTRTX
-   * LDR W1, [X0], #4
-   * MSR W1, DBGDTRTX_EL0
-   */
-
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_DBGDTRRX_EL0, 0x80000);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_DBGDTRRX_EL0, &reg);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDSCR, edi->edscr & ~(1 << 20));
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_DBGDTRRX_EL0, &reg);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_DBGDTRRX_EL0, &reg);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_DBGDTRRX_EL0, &reg);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-
-  // adiv5_mem_ap_write_word(base + DBG_REG_ADDR_DBGDTRTX_EL0, 0x3fffffff);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDLSR, &edi->edlsr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDRCR, &edi->edrcr);
-  edi->edrcr |= 1<<3;
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDRCR, edi->edrcr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDITR, 0x52800020);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDITR, 0x52800020);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  adiv5_mem_ap_write_word(&t->dap, base + DBG_REG_ADDR_EDITR, 0x52800020);
-  adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-  while(1) {
-    adiv5_mem_ap_read_word_drw(&t->dap, base + DBG_REG_ADDR_DBGDTRTX_EL0, &reg);
-    adiv5_mem_ap_read_word_drw(&t->dap, base + DBG_REG_ADDR_DBGDTRRX_EL0, &reg);
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDESR, &edi->edesr);
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDSCR, &edi->edscr);
-    adiv5_mem_ap_read_word(&t->dap, base + DBG_REG_ADDR_EDPRSR, &edi->edprsr);
-  }
-}
-
-
 #define ADIV5_MAX_ROM_ENTRIES 32
+#define ARRAY_SIZE(_a) (sizeof(_a)/sizeof(_a[0]))
+
+bool target_halt(struct target *t)
+{
+  return target_arm_halt(&t->dap, &t->core[0].edi, t->core[0].debug,
+    t->core[0].cti);
+}
+
+bool target_resume(struct target *t)
+{
+  return target_arm_resume(&t->dap, &t->core[0].edi, t->core[0].debug,
+    t->core[0].cti);
+}
+
 
 static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)
 {
@@ -235,6 +74,46 @@ static void target_parse_rom(struct target *t)
   }
 }
 
+bool target_exec_instr(struct target *t, uint32_t instr)
+{
+  target_arm_exec_instr(&t->dap, &t->core[0].edi, t->core[0].debug, instr);
+}
+
+void raspberrypi_soft_reset(struct target *t)
+{
+  size_t i;
+    /* Raspberry PI reset sequence */
+    /* 0x3f100024, (0x5a << 24) | 1 */
+    /* 0x3f10001c, (0x5a << 24) | 0x20 */
+/*
+   0:   52800021        mov     w1, #0x1                        // #1
+   4:   72ab4001        movk    w1, #0x5a00, lsl #16
+   8:   d2800480        mov     x0, #0x24                       // #36
+   c:   f2a7e200        movk    x0, #0x3f10, lsl #16
+  10:   b9000001        str     w1, [x0]
+  14:   52800401        mov     w1, #0x20                       // #32
+  18:   72ab4001        movk    w1, #0x5a00, lsl #16
+  1c:   d2800380        mov     x0, #0x1c                       // #28
+  20:   f2a7e200        movk    x0, #0x3f10, lsl #16
+  24:   b9000001        str     w1, [x0]
+*/
+  const uint32_t instructions[] = {
+    0x52800021,
+    0x72ab4001,
+    0xd2800480,
+    0xf2a7e200,
+    0xb9000001,
+    0x52800401,
+    0x72ab4001,
+    0xd2800380,
+    0xf2a7e200,
+    0xb9000001
+  };
+
+  for (i = 0; i < ARRAY_SIZE(instructions); ++i)
+    target_exec_instr(t, instructions[i]);
+}
+
 bool target_init(struct target *t)
 {
   int i;
@@ -255,13 +134,18 @@ bool target_init(struct target *t)
   t->core[3].cti = 0x8001b000;
 
   for (i = 0; i < 4; ++i)
-    target_arm_init(&t->dap, t->core[i].debug, &t->core[i].edi);
+    target_arm_init(&t->dap, &t->core[i].edi, t->core[i].debug,
+      t->core[i].cti);
 
-  cti_init(&t->dap, t->core[0].cti);
+  int f = 0;
   while(1) {
     target_halt(t);
-    target_read(t);
+    if (f)
+      raspberrypi_soft_reset(t);
+    else
+      target_arm_mess(&t->dap, &t->core[0].edi, t->core[0].debug, t->core[0].cti);
     target_resume(t);
+    f = 1;
   }
 
   return true;

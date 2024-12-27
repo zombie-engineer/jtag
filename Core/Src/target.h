@@ -22,7 +22,7 @@ struct target {
   struct target_core core[4];
 };
 
-void target_halt(struct target *d);
-void target_resume(struct target *d);
-void target_read(struct target *d);
+bool target_halt(struct target *d);
+bool target_resume(struct target *d);
 bool target_init(struct target *t);
+bool target_exec_instr(struct target *t, uint32_t instr);
