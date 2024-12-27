@@ -3,7 +3,7 @@
 #include "cmsis_edi.h"
 #include "arm_cti.h"
 
-static inline bool target_arm_set_mod_reg_bits(struct adiv5_dap *d,
+static inline bool aarch64_set_mod_reg_bits(struct adiv5_dap *d,
   uint32_t regaddr, uint32_t *reg_cache, uint32_t mask, uint32_t value)
 {
   uint32_t reg;
@@ -18,7 +18,7 @@ static inline bool target_arm_set_mod_reg_bits(struct adiv5_dap *d,
   return good_value == *preg;
 }
 
-static void target_arm_read_status_regs(struct adiv5_dap *d,
+static void aarch64_read_status_regs(struct adiv5_dap *d,
   struct aarch64_dbg_regs_cache *ed, uint32_t baseaddr)
 {
   adiv5_mem_ap_read_word(d, baseaddr + DBG_REG_ADDR_EDESR, &ed->edesr);
@@ -26,9 +26,9 @@ static void target_arm_read_status_regs(struct adiv5_dap *d,
   adiv5_mem_ap_read_word(d, baseaddr + DBG_REG_ADDR_EDSCR, &ed->edscr);
 }
 
-bool target_arm_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
+bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
 {
-  bool success = target_arm_set_mod_reg_bits(a->dap,
+  bool success = aarch64_set_mod_reg_bits(a->dap,
     baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr, 1<<20, 1<<20);
 
   if (success)
@@ -38,9 +38,9 @@ bool target_arm_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
   return success;
 }
 
-bool target_arm_set_normal_mode(struct aarch64 *a, uint32_t baseaddr)
+bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr)
 {
-  bool success = target_arm_set_mod_reg_bits(a->dap,
+  bool success = aarch64_set_mod_reg_bits(a->dap,
     baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr, 1<<20, 0);
 
   if (success) {
@@ -51,10 +51,10 @@ bool target_arm_set_normal_mode(struct aarch64 *a, uint32_t baseaddr)
   return success;
 }
 
-bool target_arm_halt(struct aarch64 *a, uint32_t baseaddr,
+bool aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr)
 {
-  if (!target_arm_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+  if (!aarch64_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
     &a->regs.edscr, 1<<14, 1<<14))
     return false;
 
@@ -77,14 +77,14 @@ bool target_arm_halt(struct aarch64 *a, uint32_t baseaddr,
     adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
   }
 
-  target_arm_read_status_regs(a->dap, &a->regs, baseaddr);
+  aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
   return true;
 }
 
-bool target_arm_resume(struct aarch64 *a, uint32_t baseaddr,
+bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr)
 {
-  if (!target_arm_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+  if (!aarch64_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
     &a->regs.edscr, 1<<14, 1<<14))
     return false;
 
@@ -100,16 +100,16 @@ bool target_arm_resume(struct aarch64 *a, uint32_t baseaddr,
       break;
   }
 
-  target_arm_read_status_regs(a->dap, &a->regs, baseaddr);
+  aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
   return true;
 }
 
-void target_arm_mess(struct aarch64 *a, uint32_t baseaddr,
+void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr)
 {
   uint32_t reg = 0;
 
-  if (!target_arm_set_normal_mode(a, baseaddr))
+  if (!aarch64_set_normal_mode(a, baseaddr))
     return;
 
   /* mrs x0, dlr_el0 */
@@ -138,7 +138,7 @@ void target_arm_mess(struct aarch64 *a, uint32_t baseaddr,
   // adiv5_mem_ap_write_word(baseaddr + DBG_REG_ADDR_EDITR, 0xd5130500);
   adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
   adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR, &a->regs.edprsr);
-  target_arm_set_memory_mode(a, baseaddr);
+  aarch64_set_memory_mode(a, baseaddr);
 
   while(1) {
     adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &reg);
@@ -185,16 +185,16 @@ void target_arm_mess(struct aarch64 *a, uint32_t baseaddr,
   }
 }
 
-bool target_arm_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr)
+bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr)
 {
-  if (!target_arm_set_normal_mode(a, baseaddr))
+  if (!aarch64_set_normal_mode(a, baseaddr))
     return false;
 
   adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR, instr);
   return true;
 }
 
-void target_arm_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
+void aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
   uint32_t cti_baseaddr)
 {
   uint32_t reg;

@@ -10,7 +10,7 @@
 
 bool target_core_halt(struct target_core *c)
 {
-  bool success = target_arm_halt(&c->a64, c->debug, c->cti);
+  bool success = aarch64_halt(&c->a64, c->debug, c->cti);
 
   if (success)
     c->halted = true;
@@ -25,7 +25,7 @@ bool target_core_resume(struct target_core *c)
   if (!c->halted)
     return false;
 
-  success = target_arm_resume(&c->a64, c->debug, c->cti);
+  success = aarch64_resume(&c->a64, c->debug, c->cti);
   if (success)
     c->halted = false;
 
@@ -99,7 +99,7 @@ bool target_core_exec(struct target_core *c, uint32_t instr)
   if (!c->halted)
     return false;
 
-  return target_arm_exec(&c->a64, c->debug, instr);
+  return aarch64_exec(&c->a64, c->debug, instr);
 }
 
 void raspberrypi_soft_reset(struct target *t)
@@ -157,7 +157,7 @@ bool target_init(struct target *t)
   t->core[3].cti = 0x8001b000;
 
   for (i = 0; i < 4; ++i)
-    target_arm_init(&t->core[i].a64, &t->dap, t->core[i].debug, t->core[i].cti);
+    aarch64_init(&t->core[i].a64, &t->dap, t->core[i].debug, t->core[i].cti);
 
   int f = 0;
   while(1) {
@@ -165,7 +165,7 @@ bool target_init(struct target *t)
     if (f)
       raspberrypi_soft_reset(t);
     else
-      target_arm_mess(&t->core[0].a64, t->core[0].debug, t->core[0].cti);
+      aarch64_mess(&t->core[0].a64, t->core[0].debug, t->core[0].cti);
     target_resume(t);
     f = 1;
   }

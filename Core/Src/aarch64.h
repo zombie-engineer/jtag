@@ -39,20 +39,20 @@ struct aarch64 {
   bool is_mem_mode;
 };
 
-void target_arm_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
+void aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool target_arm_set_memory_mode(struct aarch64 *a, uint32_t baseaddr);
+bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr);
 
-bool target_arm_set_normal_mode(struct aarch64 *a, uint32_t baseaddr);
+bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr);
 
-bool target_arm_halt(struct aarch64 *a, uint32_t baseaddr,
+bool aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool target_arm_resume(struct aarch64 *a, uint32_t baseaddr,
+bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-void target_arm_mess(struct aarch64 *a, uint32_t baseaddr,
+void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool target_arm_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr);
+bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr);
