@@ -3,7 +3,6 @@
 #include "jtag.h"
 #include "cmsis_edi.h"
 #include "arm_cmsis.h"
-#include "target_arm.h"
 #include "cmsis_arch_id.h"
 
 #define ADIV5_MAX_ROM_ENTRIES 32

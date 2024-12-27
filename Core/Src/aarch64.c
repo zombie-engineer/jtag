@@ -1,4 +1,4 @@
-#include "target_arm.h"
+#include "aarch64.h"
 #include "adiv5.h"
 #include "cmsis_edi.h"
 #include "arm_cti.h"
