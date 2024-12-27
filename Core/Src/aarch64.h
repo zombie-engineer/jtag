@@ -4,7 +4,7 @@
 
 struct adiv5_dap;
 
-struct ext_dbg_aarch64 {
+struct aarch64_dbg_regs_cache {
   /* Event status register cache */
   uint32_t edesr;
   /* Execution control register cache */
@@ -33,23 +33,26 @@ struct ext_dbg_aarch64 {
   uint32_t memfeature1;
 };
 
-void target_arm_init(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
-  uint32_t baseaddr, uint32_t cti_baseaddr);
+struct aarch64 {
+  struct adiv5_dap *dap;
+  struct aarch64_dbg_regs_cache regs;
+  bool is_mem_mode;
+};
 
-bool target_arm_set_memory_mode(struct adiv5_dap *d,
-  struct ext_dbg_aarch64 *ed, uint32_t baseaddr);
+void target_arm_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
+  uint32_t cti_baseaddr);
 
-bool target_arm_set_normal_mode(struct adiv5_dap *d,
-  struct ext_dbg_aarch64 *ed, uint32_t baseaddr);
+bool target_arm_set_memory_mode(struct aarch64 *a, uint32_t baseaddr);
 
-bool target_arm_halt(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
-  uint32_t baseaddr, uint32_t cti_baseaddr);
+bool target_arm_set_normal_mode(struct aarch64 *a, uint32_t baseaddr);
 
-bool target_arm_resume(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
-  uint32_t baseaddr, uint32_t cti_baseaddr);
+bool target_arm_halt(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t cti_baseaddr);
 
-void target_arm_mess(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
-  uint32_t baseaddr, uint32_t cti_baseaddr);
+bool target_arm_resume(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t cti_baseaddr);
 
-bool target_arm_exec(struct adiv5_dap *d, struct ext_dbg_aarch64 *ed,
-  uint32_t baseaddr, uint32_t instr);
+void target_arm_mess(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t cti_baseaddr);
+
+bool target_arm_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr);

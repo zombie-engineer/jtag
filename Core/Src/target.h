@@ -5,7 +5,7 @@
 #include <stdbool.h>
 
 struct target_core {
-  struct ext_dbg_aarch64 edi;
+  struct aarch64 a64;
 
   uint32_t debug;
   uint32_t cti;
@@ -17,7 +17,6 @@ struct target_core {
   bool etm_exists;
 
   bool halted;
-  bool memory_mode;
 };
 
 struct target {

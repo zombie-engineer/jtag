@@ -8,9 +8,9 @@
 #define ADIV5_MAX_ROM_ENTRIES 32
 #define ARRAY_SIZE(_a) (sizeof(_a)/sizeof(_a[0]))
 
-bool target_core_halt(struct adiv5_dap *d, struct target_core *c)
+bool target_core_halt(struct target_core *c)
 {
-  bool success = target_arm_halt(d, &c->edi, c->debug, c->cti);
+  bool success = target_arm_halt(&c->a64, c->debug, c->cti);
 
   if (success)
     c->halted = true;
@@ -18,14 +18,14 @@ bool target_core_halt(struct adiv5_dap *d, struct target_core *c)
   return success;
 }
 
-bool target_core_resume(struct adiv5_dap *d, struct target_core *c)
+bool target_core_resume(struct target_core *c)
 {
   bool success;
 
   if (!c->halted)
     return false;
 
-  success = target_arm_resume(d, &c->edi, c->debug, c->cti);
+  success = target_arm_resume(&c->a64, c->debug, c->cti);
   if (success)
     c->halted = false;
 
@@ -34,12 +34,12 @@ bool target_core_resume(struct adiv5_dap *d, struct target_core *c)
 
 bool target_halt(struct target *t)
 {
-  return target_core_halt(&t->dap, &t->core[0]);
+  return target_core_halt(&t->core[0]);
 }
 
 bool target_resume(struct target *t)
 {
-  return target_core_resume(&t->dap, &t->core[0]);
+  return target_core_resume(&t->core[0]);
 }
 
 static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)
@@ -94,13 +94,12 @@ static void target_parse_rom(struct target *t)
   }
 }
 
-bool target_core_exec(struct adiv5_dap *d, struct target_core *c,
-  uint32_t instr)
+bool target_core_exec(struct target_core *c, uint32_t instr)
 {
   if (!c->halted)
     return false;
 
-  return target_arm_exec(d, &c->edi, c->debug, instr);
+  return target_arm_exec(&c->a64, c->debug, instr);
 }
 
 void raspberrypi_soft_reset(struct target *t)
@@ -135,7 +134,7 @@ void raspberrypi_soft_reset(struct target *t)
   };
 
   for (i = 0; i < ARRAY_SIZE(instructions); ++i)
-    target_core_exec(&t->dap, &t->core[0], instructions[i]);
+    target_core_exec(&t->core[0], instructions[i]);
 }
 
 bool target_init(struct target *t)
@@ -158,8 +157,7 @@ bool target_init(struct target *t)
   t->core[3].cti = 0x8001b000;
 
   for (i = 0; i < 4; ++i)
-    target_arm_init(&t->dap, &t->core[i].edi, t->core[i].debug,
-      t->core[i].cti);
+    target_arm_init(&t->core[i].a64, &t->dap, t->core[i].debug, t->core[i].cti);
 
   int f = 0;
   while(1) {
@@ -167,7 +165,7 @@ bool target_init(struct target *t)
     if (f)
       raspberrypi_soft_reset(t);
     else
-      target_arm_mess(&t->dap, &t->core[0].edi, t->core[0].debug, t->core[0].cti);
+      target_arm_mess(&t->core[0].a64, t->core[0].debug, t->core[0].cti);
     target_resume(t);
     f = 1;
   }
