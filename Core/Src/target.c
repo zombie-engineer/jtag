@@ -4,9 +4,9 @@
 #include "cmsis_edi.h"
 #include "arm_cmsis.h"
 #include "cmsis_arch_id.h"
+#include "common.h"
 
 #define ADIV5_MAX_ROM_ENTRIES 32
-#define ARRAY_SIZE(_a) (sizeof(_a)/sizeof(_a[0]))
 
 bool target_core_halt(struct target_core *c)
 {
@@ -15,6 +15,7 @@ bool target_core_halt(struct target_core *c)
   if (success)
     c->halted = true;
 
+  aarch64_fetch_context(&c->a64, c->debug);
   return success;
 }
 

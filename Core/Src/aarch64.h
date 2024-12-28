@@ -4,6 +4,14 @@
 
 struct adiv5_dap;
 
+struct aarch64_context {
+  uint64_t pc;
+  uint64_t sp;
+  uint64_t x0_30[31];
+  int el;
+  int pstate;
+};
+
 struct aarch64_dbg_regs_cache {
   /* Event status register cache */
   uint32_t edesr;
@@ -37,6 +45,7 @@ struct aarch64 {
   struct adiv5_dap *dap;
   struct aarch64_dbg_regs_cache regs;
   bool is_mem_mode;
+  struct aarch64_context ctx;
 };
 
 void aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
@@ -56,3 +65,4 @@ void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
 bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr);
+bool aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr);

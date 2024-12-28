@@ -26,6 +26,7 @@
 #include "adiv5.h"
 #include "cmsis_edi.h"
 #include "target.h"
+#include "common.h"
 
 /* USER CODE END Includes */
 

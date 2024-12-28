@@ -2,6 +2,9 @@
 #include "adiv5.h"
 #include "cmsis_edi.h"
 #include "arm_cti.h"
+#include "aarch64_edprsr.h"
+#include "aarch64_edscr.h"
+#include "common.h"
 
 static inline bool aarch64_set_mod_reg_bits(struct adiv5_dap *d,
   uint32_t regaddr, uint32_t *reg_cache, uint32_t mask, uint32_t value)
@@ -58,26 +61,29 @@ bool aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
     &a->regs.edscr, 1<<14, 1<<14))
     return false;
 
+#if 0
   adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDECR,
     &a->regs.edecr);
+#endif
 
   /* HALT */
   cti_pulse_event(a->dap, cti_baseaddr, CTI_EVENT_HALT);
   while(1) {
+    /* Processor status register has info if core is halted or not */
     adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR,
       &a->regs.edprsr);
-    if ((a->regs.edprsr >> 4) & 1)
+    if (aarch64_edprsr_is_halted(a->regs.edprsr))
       break;
   }
 
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDESR, &a->regs.edesr);
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDECR, &a->regs.edecr);
-  if (a->regs.edscr & (1<<6)) {
+  aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
+
+  if (aarch64_edscr_is_error(a->regs.edscr)) {
     adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDRCR, (1<<2)|(1<<3));
     adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
+    aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
   }
 
-  aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
   return true;
 }
 
@@ -191,6 +197,105 @@ bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr)
     return false;
 
   adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR, instr);
+  return true;
+}
+
+#define AARCH64_CORE_REG_X0 0
+#define AARCH64_CORE_REG_X1 1
+#define AARCH64_CORE_REG_X2 2
+#define AARCH64_CORE_REG_X3 3
+#define AARCH64_CORE_REG_X4 4
+#define AARCH64_CORE_REG_X5 5
+#define AARCH64_CORE_REG_X6 6
+#define AARCH64_CORE_REG_X7 7
+#define AARCH64_CORE_REG_X8 8
+#define AARCH64_CORE_REG_X9 9
+#define AARCH64_CORE_REG_X10 10
+#define AARCH64_CORE_REG_X11 11
+#define AARCH64_CORE_REG_X12 12
+#define AARCH64_CORE_REG_X13 13
+#define AARCH64_CORE_REG_X14 14
+#define AARCH64_CORE_REG_X15 15
+#define AARCH64_CORE_REG_X16 16
+#define AARCH64_CORE_REG_X17 17
+#define AARCH64_CORE_REG_X18 18
+#define AARCH64_CORE_REG_X19 19
+#define AARCH64_CORE_REG_X20 20
+#define AARCH64_CORE_REG_X21 21
+#define AARCH64_CORE_REG_X22 22
+#define AARCH64_CORE_REG_X23 23
+#define AARCH64_CORE_REG_X24 24
+#define AARCH64_CORE_REG_X25 25
+#define AARCH64_CORE_REG_X26 26
+#define AARCH64_CORE_REG_X27 27
+#define AARCH64_CORE_REG_X28 28
+#define AARCH64_CORE_REG_X29 29
+#define AARCH64_CORE_REG_X30 30
+#define AARCH64_CORE_REG_PC  31
+#define AARCH64_CORE_REG_SP  32
+
+bool aarch64_fetch_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg,
+  uint64_t *out_reg)
+{
+  uint32_t tmp = 0;
+
+  uint32_t instructions[2];
+  int num_i;
+
+  if (reg >= AARCH64_CORE_REG_X0 && reg <= AARCH64_CORE_REG_X30) {
+    instructions[0] = 0xd5130500 | reg;
+    num_i = 1;
+  }
+  else if (reg == AARCH64_CORE_REG_PC) {
+    /* mrs x0, dlr_el0 */
+    instructions[0] = 0xd53b4520;
+    /* msr dbgdtrtx_el0, x0 */
+    instructions[1] = 0xd5130500;
+    num_i = 2;
+  }
+  else if (reg == AARCH64_CORE_REG_SP) {
+    /* mov x0, sp */
+    instructions[0] = 0x910003e0;
+    /* msr dbgdtrtx_el0, x0 */
+    instructions[1] = 0xd5130500;
+  }
+  else
+    return false;
+
+  for (int i = 0; i < num_i; ++i) {
+    adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
+      instructions[i]);
+  }
+
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+  if (aarch64_edscr_is_error(a->regs.edscr))
+    return false;
+
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp);
+  *out_reg = tmp;
+  return true;
+}
+
+bool aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
+{
+  uint64_t reg;
+
+  struct aarch64_context *c = &a->ctx;
+
+  for (int i = AARCH64_CORE_REG_X0; i <= AARCH64_CORE_REG_X30; ++i) {
+    if (!aarch64_fetch_core_reg(a, baseaddr, i, &reg))
+      return false;
+    c->x0_30[i] = reg;
+  }
+
+  if (!aarch64_fetch_core_reg(a, baseaddr, AARCH64_CORE_REG_PC, &reg))
+    return false;
+  c->pc = reg;
+
+  if (!aarch64_fetch_core_reg(a, baseaddr, AARCH64_CORE_REG_SP, &reg))
+    return false;
+  c->sp = reg;
   return true;
 }
 
