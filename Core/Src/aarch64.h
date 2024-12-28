@@ -8,8 +8,10 @@ struct aarch64_context {
   uint64_t pc;
   uint64_t sp;
   uint64_t x0_30[31];
+  uint64_t sctlr_el1;
   int el;
   int pstate;
+  bool mmu_on;
 };
 
 struct aarch64_dbg_regs_cache {

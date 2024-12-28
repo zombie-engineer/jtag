@@ -10,13 +10,11 @@
 
 bool target_core_halt(struct target_core *c)
 {
-  bool success = aarch64_halt(&c->a64, c->debug, c->cti);
+  if (!aarch64_halt(&c->a64, c->debug, c->cti))
+    return false;
 
-  if (success)
-    c->halted = true;
-
-  aarch64_fetch_context(&c->a64, c->debug);
-  return success;
+  c->halted = true;
+  return aarch64_fetch_context(&c->a64, c->debug);
 }
 
 bool target_core_resume(struct target_core *c)

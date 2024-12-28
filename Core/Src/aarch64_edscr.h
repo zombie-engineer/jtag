@@ -7,6 +7,8 @@
 #define EDSCR_ERR         6
 #define EDSCR_A           7
 #define EDSCR_EL          8
+#define EDSCR_EL_WIDTH    2
+
 #define EDSCR_RW          10
 /* Halt event */
 #define EDSCR_HDE         14
@@ -48,4 +50,14 @@ static inline int aarch64_edscr_get_status(uint32_t edscr)
 static inline bool aarch64_edscr_is_error(uint32_t edscr)
 {
   return (edscr >> EDSCR_ERR) & 1;
+}
+
+static inline bool aarch64_edscr_is_tx_full(uint32_t edscr)
+{
+  return (edscr >> EDSCR_TX_FULL) & 1;
+}
+
+static inline int aarch64_edscr_get_el(uint32_t edscr)
+{
+  return (edscr >> EDSCR_EL) & ((1 << EDSCR_EL_WIDTH) - 1);
 }

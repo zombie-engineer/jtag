@@ -233,31 +233,50 @@ bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr)
 #define AARCH64_CORE_REG_X30 30
 #define AARCH64_CORE_REG_PC  31
 #define AARCH64_CORE_REG_SP  32
+#define AARCH64_CORE_REG_SCTLR_EL1 33
+
+/*
+ * 4-byte Aarch64 instruction that MOVes contents of register Xn to
+ * DBGDTR_EL0, with 'n' - being register index from 0 to 30,
+ * x0, x1, x2, ..., x30
+ * DBGDTR_EL0 is a system register, accessible from software that is
+ * mapped to external debug registers DBGDTRTX_EL0 and DBGDTRRX_EL0 like that:
+ * DBGDTRTX_EL0[31:0] <- DBGDTR_EL0[31:0]
+ * DBGDTRRX_EL0[31:0] <- DBGDTR_EL0[63:32]
+ */
+#define AARCH64_INSTR_MSR_DBGDTR_EL0(__r) (0xd5130400 | (__r & 0x1f))
 
 bool aarch64_fetch_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg,
   uint64_t *out_reg)
 {
-  uint32_t tmp = 0;
+  uint32_t tmp_lo = 0, tmp_hi = 0;
 
   uint32_t instructions[2];
   int num_i;
 
   if (reg >= AARCH64_CORE_REG_X0 && reg <= AARCH64_CORE_REG_X30) {
-    instructions[0] = 0xd5130500 | reg;
+    /* msr dbgdtr_el0, xN, where N==reg*/
+    instructions[0] = AARCH64_INSTR_MSR_DBGDTR_EL0(reg);
     num_i = 1;
   }
   else if (reg == AARCH64_CORE_REG_PC) {
     /* mrs x0, dlr_el0 */
     instructions[0] = 0xd53b4520;
-    /* msr dbgdtrtx_el0, x0 */
-    instructions[1] = 0xd5130500;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
     num_i = 2;
   }
   else if (reg == AARCH64_CORE_REG_SP) {
     /* mov x0, sp */
     instructions[0] = 0x910003e0;
-    /* msr dbgdtrtx_el0, x0 */
-    instructions[1] = 0xd5130500;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+  }
+  else if (reg == AARCH64_CORE_REG_SCTLR_EL1) {
+    /* mrs x0, sctlr_el1 */
+    instructions[0] = 0xd5381000;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
   }
   else
     return false;
@@ -267,13 +286,18 @@ bool aarch64_fetch_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg,
       instructions[i]);
   }
 
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
-    &a->regs.edscr);
-  if (aarch64_edscr_is_error(a->regs.edscr))
-    return false;
+  while(1) {
+    adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+      &a->regs.edscr);
+    if (aarch64_edscr_is_error(a->regs.edscr))
+      return false;
+    if (aarch64_edscr_is_tx_full(a->regs.edscr))
+      break;
+  }
 
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp);
-  *out_reg = tmp;
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp_lo);
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRRX_EL0, &tmp_hi);
+  *out_reg = (uint64_t)tmp_lo | ((uint64_t)tmp_hi << 32);
   return true;
 }
 
@@ -296,6 +320,13 @@ bool aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
   if (!aarch64_fetch_core_reg(a, baseaddr, AARCH64_CORE_REG_SP, &reg))
     return false;
   c->sp = reg;
+  c->el = aarch64_edscr_get_el(a->regs.edscr);
+
+  if (!aarch64_fetch_core_reg(a, baseaddr, AARCH64_CORE_REG_SCTLR_EL1, &reg))
+    return false;
+  c->sctlr_el1 = reg;
+  c->mmu_on = reg & 1;
+
   return true;
 }
 
