@@ -31,7 +31,12 @@ static void aarch64_read_status_regs(struct adiv5_dap *d,
 
 bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
 {
-  bool success = aarch64_set_mod_reg_bits(a->dap,
+  bool success;
+
+  if (aarch64_edscr_is_mem_mode(a->regs.edscr))
+    return true;
+
+  success = aarch64_set_mod_reg_bits(a->dap,
     baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr, 1<<20, 1<<20);
 
   if (success)
@@ -43,8 +48,13 @@ bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
 
 bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr)
 {
-  bool success = aarch64_set_mod_reg_bits(a->dap,
-    baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr, 1<<20, 0);
+  bool success;
+
+  if (!aarch64_edscr_is_mem_mode(a->regs.edscr))
+    return true;
+
+  success = aarch64_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr, 1<<20, 0);
 
   if (success) {
     adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR,
@@ -191,15 +201,6 @@ void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   }
 }
 
-bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr)
-{
-  if (!aarch64_set_normal_mode(a, baseaddr))
-    return false;
-
-  adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR, instr);
-  return true;
-}
-
 #define AARCH64_CORE_REG_X0 0
 #define AARCH64_CORE_REG_X1 1
 #define AARCH64_CORE_REG_X2 2
@@ -234,6 +235,9 @@ bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr)
 #define AARCH64_CORE_REG_PC  31
 #define AARCH64_CORE_REG_SP  32
 #define AARCH64_CORE_REG_SCTLR_EL1 33
+#define AARCH64_CORE_REG_ESR_EL2   34
+#define AARCH64_CORE_REG_FAR_EL2   35
+#define AARCH64_CORE_REG_DISR_EL1  36
 
 /*
  * 4-byte Aarch64 instruction that MOVes contents of register Xn to
@@ -279,6 +283,24 @@ static bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
   }
+  else if (reg == AARCH64_CORE_REG_ESR_EL2) {
+    /* mrs x0, sctlr_el1 */
+    instructions[0] = 0xd53c5200;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+  }
+  else if (reg == AARCH64_CORE_REG_FAR_EL2) {
+    /* mrs x0, sctlr_el1 */
+    instructions[0] = 0xd53c6000;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+  }
+  else if (reg == AARCH64_CORE_REG_DISR_EL1) {
+    /* mrs x0, sctlr_el1 */
+    instructions[0] = 0xd538c120;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+  }
   else
     return false;
 
@@ -296,8 +318,8 @@ static bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
       break;
   }
 
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp_lo);
   adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRRX_EL0, &tmp_hi);
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp_lo);
   *out_reg = (uint64_t)tmp_lo | ((uint64_t)tmp_hi << 32);
   return true;
 }
@@ -313,6 +335,27 @@ static bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
     instructions[0] = AARCH64_INSTR_MRS_DBGDTR_EL0(reg);
     num_i = 1;
   }
+#if 0
+  else if (reg == AARCH64_CORE_REG_PC) {
+    /* mrs x0, dlr_el0 */
+    instructions[0] = 0xd53b4520;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
+  }
+  else if (reg == AARCH64_CORE_REG_SP) {
+    /* mov x0, sp */
+    instructions[0] = 0x910003e0;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+  }
+  else if (reg == AARCH64_CORE_REG_SCTLR_EL1) {
+    /* mrs x0, sctlr_el1 */
+    instructions[0] = 0xd5381000;
+    /* msr dbgdtr_el0, x0 */
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+  }
+#endif
   else
     return false;
 
@@ -327,10 +370,14 @@ static bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
       instructions[i]);
   }
 
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
-    &a->regs.edscr);
-  if (aarch64_edscr_is_error(a->regs.edscr))
-    return false;
+  while(1) {
+    adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+      &a->regs.edscr);
+    if (aarch64_edscr_is_error(a->regs.edscr))
+      return false;
+    // if (aarch64_edscr_is_tx_full(a->regs.edscr))
+    break;
+  }
 
   return true;
 }
@@ -364,18 +411,42 @@ bool aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
   return true;
 }
 
-bool aarch64_read_mem(struct aarch64 *a, uint32_t baseaddr, uint64_t addr)
+bool aarch64_read_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
+    uint32_t *dst, size_t num_words)
 {
-  uint64_t reg = 0;
-  uint32_t reg32 = 0;
+  uint32_t tmp;
 
   if (!aarch64_set_normal_mode(a, baseaddr))
     return false;
 
-  if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, 0x80000))
+  if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr))
     return false;
 
-  if (!aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, &reg))
+#if 0
+  adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
+    AARCH64_INSTR_MSR_DBGDTR_EL0(0));
+
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+#endif
+
+  if (!aarch64_set_memory_mode(a, baseaddr))
+    return false;
+
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp);
+  for (size_t i = 0; i < num_words; ++i)
+    adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
+      &dst[i]);
+  return true;
+}
+
+bool aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
+    const uint32_t *src, size_t num_words)
+{
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return false;
+
+  if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr))
     return false;
 
   adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
@@ -387,10 +458,112 @@ bool aarch64_read_mem(struct aarch64 *a, uint32_t baseaddr, uint64_t addr)
   if (!aarch64_set_memory_mode(a, baseaddr))
     return false;
 
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &reg32);
-  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &reg32);
+  for (size_t i = 0; i < num_words; ++i) {
+    adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRRX_EL0,
+      src[i]);
+  }
+
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+
+  return !aarch64_edscr_is_error(a->regs.edscr);
+}
+
+bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
+  uint64_t addr, uint32_t *out_value)
+{
+  uint64_t reg = 0;
+
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return false;
+
+  if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr))
+    return false;
+
+  /*
+   * There is an issue with some of the STR/LDR instructions that can be put
+   * into EDITR to read/write memory. The once that are compiled by GCC as
+   * binary code for ldr w1, [x0] and str w1, [x0] lead to EDSCR.ERR bit set
+   * to 1.
+   * In Armv8 architectures manual there is a bytecode, used for
+   * writing/reading values while accessing DBGDTRTX_EL0 and DBGDTRRX_EL0
+   * regs. Also Openocd has precompiled bytecode for 'slow' reads.
+   * These 2 work fine, so same bytecode I use here.
+   */
+  adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
+    0xb8404401);
+
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+
+  if (aarch64_edscr_is_error(a->regs.edscr)) {
+    adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDRCR, (1<<2)|(1<<3));
+    adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
+    aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
+    return false;
+  }
+
+  if (!aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_X1, &reg))
+    return false;
+
+  *out_value = reg & 0xffffffff;
   return true;
 }
+
+bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
+  uint64_t addr, uint32_t value)
+{
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return false;
+
+  if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr))
+    return false;
+
+  if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X1, value))
+    return false;
+
+  adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
+    0xb8004401);
+#if 0
+  adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
+    0xf8408400 | (5 << 5) | (1 << 0));
+#endif
+    // 0xb8404401);
+
+  adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+
+  if (aarch64_edscr_is_error(a->regs.edscr)) {
+    adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDRCR, (1<<2)|(1<<3));
+    adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
+    aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
+  }
+
+  return !aarch64_edscr_is_error(a->regs.edscr);
+}
+
+bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, const uint32_t *const instr, int num)
+{
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return false;
+
+  for (int i = 0; i < num; ++i) {
+    adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDITR, instr[i]);
+
+    adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+        &a->regs.edscr);
+
+    if (aarch64_edscr_is_error(a->regs.edscr)) {
+      adiv5_mem_ap_write_word(a->dap, baseaddr + DBG_REG_ADDR_EDRCR, (1<<2)|(1<<3));
+      adiv5_mem_ap_read_word(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
+      aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
+      return false;
+    }
+  }
+
+  return true;
+}
+
 
 void aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
   uint32_t cti_baseaddr)

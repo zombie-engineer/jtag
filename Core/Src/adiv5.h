@@ -47,3 +47,4 @@ void adiv5_mem_ap_write_word(struct adiv5_dap *d, uint32_t addr,
   uint32_t value);
 
 void adiv5_parse_rom(uint32_t rom_addr, void (*rom_entry_cb)(uint32_t rom));
+void adiv5_mem_ap_set_csw(struct adiv5_dap *d, int op_size, bool addrinc);

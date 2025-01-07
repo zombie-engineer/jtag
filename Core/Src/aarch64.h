@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/types.h>
 
 struct adiv5_dap;
 
@@ -46,7 +47,6 @@ struct aarch64_dbg_regs_cache {
 struct aarch64 {
   struct adiv5_dap *dap;
   struct aarch64_dbg_regs_cache regs;
-  bool is_mem_mode;
   struct aarch64_context ctx;
 };
 
@@ -66,5 +66,11 @@ bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
 void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, uint32_t instr);
+bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, const uint32_t *const instr, int num);
 bool aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr);
+bool aarch64_read_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
+    uint32_t *dst, size_t num_words);
+bool aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
+    const uint32_t *src, size_t num_words);
+bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
+  uint64_t addr, uint32_t value);

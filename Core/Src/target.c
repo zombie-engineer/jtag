@@ -93,53 +93,65 @@ static void target_parse_rom(struct target *t)
   }
 }
 
-bool target_core_exec(struct target_core *c, uint32_t instr)
+bool target_core_exec(struct target_core *c, const uint32_t * const instr, int num)
 {
   if (!c->halted)
     return false;
 
-  return aarch64_exec(&c->a64, c->debug, instr);
+  return aarch64_exec(&c->a64, c->debug, instr, num);
 }
 
-void raspberrypi_soft_reset(struct target *t)
+bool target_core_write_mem32(struct target_core *c, uint64_t dstaddr,
+    const uint32_t *src, size_t num_words)
 {
-  size_t i;
+  if (!c->halted)
+    return false;
+
+  return aarch64_write_mem32(&c->a64, c->debug, dstaddr, src, num_words);
+}
+
+bool target_core_read_mem32(struct target_core *c, uint64_t srcaddr,
+  uint32_t *dst, size_t num_words)
+{
+  if (!c->halted)
+    return false;
+
+  return aarch64_read_mem32(&c->a64, c->debug, srcaddr, dst, num_words);
+}
+
+bool target_core_write_mem32_once(struct target_core *c, uint64_t dstaddr,
+    uint32_t value)
+{
+  if (!c->halted)
+    return false;
+
+  return aarch64_write_mem32_once(&c->a64, c->debug, dstaddr, value);
+}
+
+bool raspberrypi_soft_reset(struct target *t)
+{
     /* Raspberry PI reset sequence */
     /* 0x3f100024, (0x5a << 24) | 1 */
     /* 0x3f10001c, (0x5a << 24) | 0x20 */
-/*
-   0:   52800021        mov     w1, #0x1                        // #1
-   4:   72ab4001        movk    w1, #0x5a00, lsl #16
-   8:   d2800480        mov     x0, #0x24                       // #36
-   c:   f2a7e200        movk    x0, #0x3f10, lsl #16
-  10:   b9000001        str     w1, [x0]
-  14:   52800401        mov     w1, #0x20                       // #32
-  18:   72ab4001        movk    w1, #0x5a00, lsl #16
-  1c:   d2800380        mov     x0, #0x1c                       // #28
-  20:   f2a7e200        movk    x0, #0x3f10, lsl #16
-  24:   b9000001        str     w1, [x0]
-*/
-  const uint32_t instructions[] = {
-    0x52800021,
-    0x72ab4001,
-    0xd2800480,
-    0xf2a7e200,
-    0xb9000001,
-    0x52800401,
-    0x72ab4001,
-    0xd2800380,
-    0xf2a7e200,
-    0xb9000001
-  };
 
-  for (i = 0; i < ARRAY_SIZE(instructions); ++i)
-    target_core_exec(&t->core[0], instructions[i]);
+  if (!target_core_write_mem32_once(&t->core[0], 0x3f100024, (0x5a << 24) | 1))
+    return false;
+
+  if (!target_core_write_mem32_once(&t->core[0], 0x3f10001c, (0x5a << 24) | 0x20))
+    return false;
+
+  return true;
 }
 
 bool target_init(struct target *t)
 {
   int i;
   int num_devs;
+  uint32_t words[2] = {
+    0xaabbccdd,
+    0x11223344
+  };
+  uint32_t test_words[2] = { 0, 0 };
 
   jtag_init();
   jtag_reset();
@@ -158,9 +170,18 @@ bool target_init(struct target *t)
   for (i = 0; i < 4; ++i)
     aarch64_init(&t->core[i].a64, &t->dap, t->core[i].debug, t->core[i].cti);
 
-  int f = 0;
+  int f = 1;
   while(1) {
     target_halt(t);
+    raspberrypi_soft_reset(t);
+    if (!target_core_write_mem32_once(&t->core[0], 0x80000, 0xd1e2b374))
+      while(1);
+
+    if (!target_core_write_mem32(&t->core[0], 0x80000, words, 2))
+      while(1);
+
+    if (!target_core_read_mem32(&t->core[0], 0x80000, test_words, 2))
+      while(1);
     if (f)
       raspberrypi_soft_reset(t);
     else

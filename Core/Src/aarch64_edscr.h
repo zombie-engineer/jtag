@@ -62,5 +62,10 @@ static inline int aarch64_edscr_get_el(uint32_t edscr)
   return (edscr >> EDSCR_EL) & ((1 << EDSCR_EL_WIDTH) - 1);
 }
 
+static inline int aarch64_edscr_is_mem_mode(uint32_t edscr)
+{
+  return (edscr >> EDSCR_MA) & 1;
+}
+
 
 

@@ -281,6 +281,37 @@ static void adiv5_mem_ap_init(struct adiv5_dap *d)
   adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
 }
 
+#define ADIV5_CSW_SIZE_POS     0
+#define ADIV5_CSW_ADDRINCR_POS 4
+
+#define ADIV5_CSW_SIZE_MASK     (7 << ADIV5_CSW_SIZE_POS)
+#define ADIV5_CSW_ADDRINCR_MASK (3 << ADIV5_CSW_ADDRINCR_POS)
+
+void adiv5_mem_ap_set_csw(struct adiv5_dap *d, int op_size, bool addrinc)
+{
+  uint32_t new_csw = d->csw;
+  new_csw &= ~ADIV5_CSW_SIZE_MASK;
+  new_csw &= ~ADIV5_CSW_ADDRINCR_MASK;
+
+  if (addrinc)
+    new_csw |= (1 << ADIV5_CSW_ADDRINCR_POS) & ADIV5_CSW_ADDRINCR_MASK;
+
+  if (op_size == 1)
+    new_csw |= (0 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
+  else if (op_size == 2)
+    new_csw |= (1 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
+  else if (op_size == 4)
+    new_csw |= (2 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
+  else if (op_size == 8)
+    new_csw |= (3 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
+  else if (op_size == 16)
+    new_csw |= (4 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
+  else if (op_size == 32)
+    new_csw |= (5 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
+
+  adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_CSW, new_csw, &d->csw);
+}
+
 #define EXIT_ON_FAIL() \
   do { \
     if (!success) \
