@@ -174,6 +174,7 @@ bool target_init(struct target *t)
   while(1) {
     target_halt(t);
     raspberrypi_soft_reset(t);
+    break;
     if (!target_core_write_mem32_once(&t->core[0], 0x80000, 0xd1e2b374))
       while(1);
 
