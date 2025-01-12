@@ -170,6 +170,7 @@ bool target_init(struct target *t)
   for (i = 0; i < 4; ++i)
     aarch64_init(&t->core[i].a64, &t->dap, t->core[i].debug, t->core[i].cti);
 
+#if 0
   int f = 1;
   while(1) {
     target_halt(t);
@@ -191,6 +192,7 @@ bool target_init(struct target *t)
     f = 1;
   }
 
+#endif
   return true;
 }
 
