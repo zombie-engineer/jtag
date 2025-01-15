@@ -26,5 +26,8 @@ struct target {
 
 bool target_halt(struct target *d);
 bool target_resume(struct target *d);
-bool target_init(struct target *t);
+bool target_init(struct target *t, uint32_t *idcode);
+bool target_soft_reset(struct target *t);
+bool target_mem_read_32(struct target *t, uint64_t addr, uint32_t *out);
+bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value);
 bool target_exec_instr(struct target *t, uint32_t instr);

@@ -336,9 +336,9 @@ uint8_t * USBD_FS_InterfaceStrDescriptor(USBD_SpeedTypeDef speed, uint16_t *leng
   */
 static void Get_SerialNum(void)
 {
-  uint32_t deviceserial0;
-  uint32_t deviceserial1;
-  uint32_t deviceserial2;
+  uint32_t deviceserial0 = 0x11223344;
+  uint32_t deviceserial1 = 0x55667788;
+  uint32_t deviceserial2 = 0x99aabbcc;
 
   deviceserial0 += deviceserial2;
 

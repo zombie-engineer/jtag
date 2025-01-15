@@ -74,3 +74,5 @@ bool aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
     const uint32_t *src, size_t num_words);
 bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t value);
+bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
+  uint64_t addr, uint32_t *out_value);

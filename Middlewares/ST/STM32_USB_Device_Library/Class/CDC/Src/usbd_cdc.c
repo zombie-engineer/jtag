@@ -100,6 +100,8 @@ EndBSPDependencies */
   */
 
 
+extern void transmit_completed_callback(void);
+
 static uint8_t  USBD_CDC_Init(USBD_HandleTypeDef *pdev,
                               uint8_t cfgidx);
 
@@ -523,6 +525,8 @@ static uint8_t  USBD_CDC_Init(USBD_HandleTypeDef *pdev, uint8_t cfgidx)
     hcdc->TxState = 0U;
     hcdc->RxState = 0U;
 
+    transmit_completed_callback();
+
     if (pdev->dev_speed == USBD_SPEED_HIGH)
     {
       /* Prepare Out endpoint to receive next packet */
@@ -691,6 +695,7 @@ static uint8_t  USBD_CDC_DataIn(USBD_HandleTypeDef *pdev, uint8_t epnum)
     }
     else
     {
+      transmit_completed_callback();
       hcdc->TxState = 0U;
     }
     return USBD_OK;

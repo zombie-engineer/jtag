@@ -116,7 +116,7 @@ bool target_core_read_mem32(struct target_core *c, uint64_t srcaddr,
   if (!c->halted)
     return false;
 
-  return aarch64_read_mem32(&c->a64, c->debug, srcaddr, dst, num_words);
+  return aarch64_read_mem32_once(&c->a64, c->debug, srcaddr, dst);
 }
 
 bool target_core_write_mem32_once(struct target_core *c, uint64_t dstaddr,
@@ -143,21 +143,28 @@ bool raspberrypi_soft_reset(struct target *t)
   return true;
 }
 
-bool target_init(struct target *t)
+bool target_soft_reset(struct target *t)
+{
+  return raspberrypi_soft_reset(t);
+}
+
+bool target_init(struct target *t, uint32_t *idcode)
 {
   int i;
   int num_devs;
+#if 0
   uint32_t words[2] = {
     0xaabbccdd,
     0x11223344
   };
   uint32_t test_words[2] = { 0, 0 };
+#endif
 
   jtag_init();
   jtag_reset();
 
   num_devs = jtag_scan_num_devs();
-  jtag_read_idcode();
+  *idcode = jtag_read_idcode();
   adiv5_dap_init(&t->dap);
 
   target_parse_rom(t);
@@ -196,3 +203,12 @@ bool target_init(struct target *t)
   return true;
 }
 
+bool target_mem_read_32(struct target *t, uint64_t addr, uint32_t *out)
+{
+  return target_core_read_mem32(&t->core[0], addr, out, 1);
+}
+
+bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value)
+{
+  return target_core_write_mem32_once(&t->core[0], addr, value);
+}

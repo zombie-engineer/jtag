@@ -297,11 +297,6 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
-void usb_push_message(const uint8_t *buf, size_t len)
-{
-  CDC_Transmit_FS(buf, len);
-}
-
 uint8_t msg[32];
 
 void uart_send_byte(uint8_t b)
