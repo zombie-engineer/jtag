@@ -36,6 +36,11 @@ bool target_halt(struct target *t)
   return target_core_halt(&t->core[0]);
 }
 
+bool target_is_halted(const struct target *t)
+{
+  return t->core[0].halted;
+}
+
 bool target_resume(struct target *t)
 {
   return target_core_resume(&t->core[0]);
@@ -148,7 +153,7 @@ bool target_soft_reset(struct target *t)
   return raspberrypi_soft_reset(t);
 }
 
-bool target_init(struct target *t, uint32_t *idcode)
+bool target_init(struct target *t)
 {
   int i;
   int num_devs;
@@ -164,7 +169,7 @@ bool target_init(struct target *t, uint32_t *idcode)
   jtag_reset();
 
   num_devs = jtag_scan_num_devs();
-  *idcode = jtag_read_idcode();
+  t->idcode = jtag_read_idcode();
   adiv5_dap_init(&t->dap);
 
   target_parse_rom(t);
@@ -200,6 +205,8 @@ bool target_init(struct target *t, uint32_t *idcode)
   }
 
 #endif
+  t->attached = true;
+  t->core[0].halted = false;
   return true;
 }
 

@@ -18,13 +18,15 @@
 struct target t;
 
 typedef enum {
-  CMD_TARGET_NONE   = 0,
-  CMD_TARGET_INIT   = 1,
-  CMD_TARGET_HALT   = 2,
-  CMD_TARGET_RESUME = 3,
-  CMD_TARGET_SOFT_RESET   = 4,
-  CMD_TARGET_MEM_READ_32  = 5,
-  CMD_TARGET_MEM_WRITE_32 = 6,
+  CMD_NONE                = 0,
+  CMD_TARGET_STATUS       = 1,
+  CMD_TARGET_INIT         = 2,
+  CMD_TARGET_HALT         = 3,
+  CMD_TARGET_RESUME       = 4,
+  CMD_TARGET_SOFT_RESET   = 5,
+  CMD_TARGET_MEM_READ_32  = 6,
+  CMD_TARGET_MEM_WRITE_32 = 7,
+  CMD_UNKNOWN
 } cmd_t;
 
 struct cmd {
@@ -47,6 +49,9 @@ static osMessageQueueId_t cmd_queue_handle;
 static osSemaphoreId_t tx_done_sema;
 static osSemaphoreId_t rx_sema;
 static osSemaphoreId_t tx_sema;
+
+static osMutexId_t msg_mutex;
+static osMutexId_t tx_mutex;
 
 /* Definitions for task_uart_rx */
 osThreadId_t task_uart_rxHandle;
@@ -118,7 +123,7 @@ static const osSemaphoreAttr_t tx_done_sema_attr = {
 static uint8_t usb_rx_buf[RX_FIFO_SIZE];
 static uint8_t usb_tx_buf[TX_FIFO_SIZE];
 
-static char logfun_buf[64];
+static char msg_buf[128];
 
 static struct fifo uart_fifo_rx = {
   .buf = usb_rx_buf,
@@ -165,11 +170,13 @@ static inline bool tx_fifo_push(uint8_t ch)
 static int uart_tx_fifo_push(const uint8_t *msg, size_t len)
 {
   size_t i;
+  osMutexAcquire(tx_mutex, osWaitForever);
 
   for (i = 0; i < len; ++i) {
     if (!tx_fifo_push(msg[i]))
       break;
   }
+  osMutexRelease(tx_mutex);
   return i;
 }
 
@@ -216,9 +223,11 @@ app_sm_state_t appstate;
 
 static void app_prompt(void)
 {
+  portENTER_CRITICAL();
   tx_fifo_push('\r');
   tx_fifo_push('\n');
   tx_fifo_push('>');
+  portEXIT_CRITICAL();
 }
 
 void app_sm_init(void)
@@ -232,6 +241,9 @@ void app_sm_init(void)
   rx_sema = osSemaphoreNew(sizeof(usb_rx_buf), 0, &rx_sema_attr);
   tx_sema = osSemaphoreNew(sizeof(usb_tx_buf), 0, &tx_sema_attr);
   tx_done_sema = osSemaphoreNew(1, 0, &tx_done_sema_attr);
+
+  msg_mutex = osMutexNew(NULL);
+  tx_mutex = osMutexNew(NULL);
 
   /* creation of task_uart_rx */
   task_uart_rxHandle = osThreadNew(task_fn_uart_rx, NULL, &task_uart_rx_attributes);
@@ -293,10 +305,14 @@ static bool cmdbuf_parse(struct cmd *c)
 
   n = strnlen(p, sizeof(cmdbuf));
   if (!n) {
-    c->cmd = CMD_TARGET_NONE;
+    c->cmd = CMD_NONE;
     return true;
   }
 
+  if (!strncmp(p, "status", 6)) {
+    c->cmd = CMD_TARGET_STATUS;
+    return true;
+  }
   if (!strncmp(p, "init", 4)) {
     c->cmd = CMD_TARGET_INIT;
     return true;
@@ -323,14 +339,16 @@ static bool cmdbuf_parse(struct cmd *c)
   return false;
 }
 
-static void logfun(const char *fmt, ...)
+static void msg(const char *fmt, ...)
 {
   int n;
   va_list vl;
   va_start(vl, fmt);
 
-  n = vsnprintf(logfun_buf, sizeof(logfun_buf), fmt, vl);
-  uart_tx_fifo_push((const uint8_t *)logfun_buf, n);
+  osMutexAcquire(msg_mutex, osWaitForever);
+  n = vsnprintf(msg_buf, sizeof(msg_buf), fmt, vl);
+  uart_tx_fifo_push((const uint8_t *)msg_buf, n);
+  osMutexRelease(msg_mutex);
   va_end(vl);
 }
 
@@ -397,15 +415,13 @@ static void app_handle_uart_rx(void)
     return;
   }
 
-  else if (c == '\n') {
-    tx_fifo_push('\n');
-  }
-
   else if (c == '\r') {
+  }
+  else if (c == '\n') {
     struct cmd cmd;
 
     if (!cmdbuf_cursor) {
-      cmd.cmd = CMD_TARGET_NONE;
+      cmd.cmd = CMD_NONE;
       osMessageQueuePut(cmd_queue_handle, &cmd, 0, 0);
       return;
     }
@@ -413,14 +429,14 @@ static void app_handle_uart_rx(void)
     tx_fifo_push('\r');
     tx_fifo_push('\n');
     cmdbuf[cmdbuf_cursor] = 0;
-    // logfun("executing '%s'\r\n", cmdbuf);
+    // msg("executing '%s'\r\n", cmdbuf);
     success = cmdbuf_parse(&cmd);
 
     cmdbuf_cursor = 0;
     cmdbuf_len = 0;
 
     if (!success) {
-      logfun("unknown command\r\n");
+      msg("unknown command\r\n>");
       return;
     }
 
@@ -481,18 +497,47 @@ void app_process_mem_read_32(struct target *t, struct cmd *c)
   uint32_t value = 0;
 
   if (target_mem_read_32(t, addr, &value))
-    logfun("%08x\r\n", value);
+    msg("0x%08x\r\n", value);
   else
-    logfun("mem read 32 failed\r\n");
+    msg("mem read 32 failed\r\n");
 }
 
 void app_process_mem_write_32(struct target *t, struct cmd *c)
 {
   uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
   if (target_mem_write_32(t, addr, c->arg2))
-    logfun("done\r\n");
+    msg("done\r\n");
   else
-    logfun("mem write 32 failed\r\n");
+    msg("mem write 32 failed\r\n");
+}
+
+#define msgbuf_push(__ptr, __s) \
+  do { \
+    strcpy(__ptr, __s); \
+    __ptr += sizeof(__s) - 1; \
+  } while(0)
+
+static void app_process_status(const struct target *t)
+{
+  char *p = msg_buf;
+  osMutexAcquire(msg_mutex, osWaitForever);
+  msgbuf_push(p, "status: ");
+
+  if (!t->attached) {
+    msgbuf_push(p, "not attached\r\n");
+    goto out;
+  }
+
+  msgbuf_push(p, "attached, ");
+  if (target_is_halted(t))
+    msgbuf_push(p, "halted\r\n");
+  else
+    msgbuf_push(p, "running\r\n");
+
+out:
+  *p = 0;
+  uart_tx_fifo_push((const uint8_t *)msg_buf, p - msg_buf);
+  osMutexRelease(msg_mutex);
 }
 
 void app_sm_process_next_cmd(void)
@@ -508,23 +553,26 @@ void app_sm_process_next_cmd(void)
     Error_Handler();
 
   switch(cmd.cmd) {
-    case CMD_TARGET_NONE:
+    case CMD_NONE:
+      break;
+    case CMD_TARGET_STATUS:
+      app_process_status(&t);
       break;
     case CMD_TARGET_INIT:
-      target_init(&t, &idcode);
-      logfun("target initialized: %08x\r\n", idcode);
+      target_init(&t);
+      msg("target initialized: %08x\r\n", t.idcode);
       break;
     case CMD_TARGET_HALT:
       success = target_halt(&t);
-      logfun("target halt status: %d\r\n", success ? 1 : 0);
+      msg("target halt status: %d\r\n", success ? 1 : 0);
       break;
     case CMD_TARGET_RESUME:
       success = target_resume(&t);
-      logfun("target resume status: %d\r\n", success ? 1 : 0);
+      msg("target resume status: %d\r\n", success ? 1 : 0);
       break;
     case CMD_TARGET_SOFT_RESET:
       success = target_soft_reset(&t);
-      logfun("target soft reset status: %d\r\n", success ? 1 : 0);
+      msg("target soft reset status: %d\r\n", success ? 1 : 0);
       break;
     case CMD_TARGET_MEM_READ_32:
       app_process_mem_read_32(&t, &cmd);
