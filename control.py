@@ -9,17 +9,30 @@ RESP_TYPE_136_BITS     = 1
 RESP_TYPE_48_BITS      = 2
 RESP_TYPE_48_BITS_BUSY = 3
 
-RESP_TYPE_R1  = RESP_TYPE_48_BITS
-RESP_TYPE_R1b = RESP_TYPE_48_BITS_BUSY
-RESP_TYPE_R2  = RESP_TYPE_136_BITS
-RESP_TYPE_R3  = RESP_TYPE_48_BITS
-RESP_TYPE_R6  = RESP_TYPE_48_BITS
-RESP_TYPE_R7  = RESP_TYPE_48_BITS
-RESP_TYPE_NA  = RESP_TYPE_NONE
+RESP_TYPE_R1  = 1
+RESP_TYPE_R1b = 2
+RESP_TYPE_R2  = 3
+RESP_TYPE_R3  = 4
+RESP_TYPE_R6  = 5
+RESP_TYPE_R7  = 6
+RESP_TYPE_NA  = 7
+
+cmdtm_resp_types = {
+  RESP_TYPE_R1  : RESP_TYPE_48_BITS,
+  RESP_TYPE_R1b : RESP_TYPE_48_BITS_BUSY,
+  RESP_TYPE_R2  : RESP_TYPE_136_BITS,
+  RESP_TYPE_R3  : RESP_TYPE_48_BITS,
+  RESP_TYPE_R6  : RESP_TYPE_48_BITS,
+  RESP_TYPE_R7  : RESP_TYPE_48_BITS,
+  RESP_TYPE_NA  : RESP_TYPE_NONE
+}
 
 DIR_UNKNOWN   = 0
 DIR_HOST2CARD = 0
 DIR_CARD2HOST = 1
+
+CMD6_CHECK_FUNCTION  = 0
+CMD6_SWITCH_FUNCTION = 1
 
 
 # Entry format CMD_ID : (RESP_TYPE, CHECK_CRC, DIR, HAS_DATA, MULTIBLOCK)
@@ -30,7 +43,7 @@ sd_commands = {
    3 : (RESP_TYPE_R6,   1, DIR_UNKNOWN  , 0, 0),
    4 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
    5 : (RESP_TYPE_R1b,  0, DIR_UNKNOWN  , 0, 0),
-   6 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
+   6 : (RESP_TYPE_R1,   1, DIR_CARD2HOST, 1, 0),
    7 : (RESP_TYPE_R1b,  1, DIR_UNKNOWN  , 0, 0),
    8 : (RESP_TYPE_R7,   1, DIR_UNKNOWN  , 0, 0),
    9 : (RESP_TYPE_R2,   0, DIR_UNKNOWN  , 0, 0),
@@ -158,6 +171,7 @@ CARD_STATE_DATA           = 5
 CARD_STATE_RECV           = 5
 CARD_STATE_PROG           = 6
 CARD_STATE_DISCARD        = 7
+CARD_STATE_UNKNOWN        = 0xff
 
 card_states = {
   CARD_STATE_IDLE            : 'idle',
@@ -169,7 +183,64 @@ card_states = {
   CARD_STATE_RECV            : 'recv',
   CARD_STATE_PROG            : 'prog',
   CARD_STATE_DISCARD         : 'discard',
+  CARD_STATE_UNKNOWN         : 'unknown',
 }
+
+all_states = [
+  CARD_STATE_IDLE,
+  CARD_STATE_READY,
+  CARD_STATE_IDENTIFICATION,
+  CARD_STATE_STANDBY,
+  CARD_STATE_TRAN,
+  CARD_STATE_DATA,
+  CARD_STATE_RECV,
+  CARD_STATE_PROG,
+  CARD_STATE_DISCARD
+]
+
+cmd_valid_states = {
+  0  : all_states,
+  2  : [CARD_STATE_READY],
+  3  : [CARD_STATE_IDENTIFICATION],
+  6  : [CARD_STATE_TRAN],
+  7  : [CARD_STATE_TRAN, CARD_STATE_STANDBY],
+  8  : [CARD_STATE_IDLE],
+  9  : [CARD_STATE_STANDBY],
+  13 : all_states,
+  17 : [CARD_STATE_TRAN],
+  55 : all_states,
+}
+
+acmd_valid_states = {
+   6 : [CARD_STATE_TRAN],
+  13 : [CARD_STATE_TRAN],
+  41 : [CARD_STATE_IDLE, CARD_STATE_READY],
+  51 : [CARD_STATE_TRAN],
+}
+
+cmd_target_states = {
+  0  : CARD_STATE_IDLE,
+  2  : CARD_STATE_IDENTIFICATION,
+  3  : CARD_STATE_STANDBY,
+  6  : None,
+  7  : CARD_STATE_TRAN,
+  8  : CARD_STATE_IDLE,
+  9  : CARD_STATE_STANDBY,
+  13 : None,
+  17 : None,
+  55 : None,
+}
+
+acmd_target_states = {
+   6 : None,
+  13 : None,
+  41 : CARD_STATE_READY,
+  51 : None,
+}
+
+def target_states(is_acmd, cmd_idx):
+  states = acmd_target_states if is_acmd else cmd_target_states
+  return states[cmd_idx]
 
 def bitplace(v, bitpos, width):
   return (v & ((1 << width) - 1)) << bitpos
@@ -182,16 +253,23 @@ def byteswap32(v):
   return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 
 
-def gen_cmdtm(is_acmd, cmd_id):
+def gen_cmdtm(is_acmd, cmd_idx):
   dbase = sd_acommands if is_acmd else sd_commands
-  resp_type, crc, direction, is_data, multiblock = dbase[cmd_id]
+  resp_type, crc, direction, is_data, multiblock = dbase[cmd_idx]
+  resp_type = cmdtm_resp_types[resp_type]
   return \
       bitplace(direction ,  4, 1) \
     | bitplace(multiblock,  5, 1) \
     | bitplace(resp_type , 16, 2) \
     | bitplace(crc       , 19, 1) \
     | bitplace(is_data   , 21, 1) \
-    | bitplace(cmd_id    , 24, 6) \
+    | bitplace(cmd_idx   , 24, 6) \
+
+
+def cmd_resp_type(is_acmd, cmd_idx):
+  dbase = sd_acommands if is_acmd else sd_commands
+  resp_type, crc, direction, is_data, multiblock = dbase[cmd_idx]
+  return resp_type
 
 
 class TargetStatus:
@@ -292,7 +370,7 @@ class cmd_result:
     self.resp2 = resp2
     self.resp3 = resp3
 
-class emmc:
+class SDHC:
   def __init__(self, t):
     self.__t = t
 
@@ -404,7 +482,6 @@ class emmc:
     self.control1_write(v)
     v = self.control1_read()
 
-
   def sw_reset_cmd(self):
     v = self.control1_read()
     v |= 1<<25
@@ -425,14 +502,16 @@ class emmc:
         break
     print('emmc sw reset all done')
 
-
-  def do_cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp=False, data_size=0):
-    print(f'Running CMD{cmd_idx}')
+  def cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp=False, data_size=0):
+    cmd_type = 'ACMD' if is_acmd else 'CMD'
+    print(f'Running {cmd_type}{cmd_idx}')
     while True:
       status = self.status_read()
       if (status & 1) == 0:
         break
+
     self.blkszcnt_write(blksize)
+
     self.arg1_write(arg1)
     self.cmdtm_write(gen_cmdtm(is_acmd, cmd_idx))
     status = self.status_read()
@@ -450,7 +529,11 @@ class emmc:
 
     data = b''
     for i in range(int(data_size / 4)):
-      status = self.status_read()
+      print(i, int(data_size / 4))
+      while True:
+        status = self.status_read()
+        if status & (1<<9):
+          break
       data += struct.pack('I', self.data_read())
 
     print('Finished CMD{}, resp {:08x} {:08x} {:08x} {:08x}, data:{}'.format(
@@ -463,12 +546,77 @@ class emmc:
     return cmd_result(status, data, resp0, resp1, resp2, resp3)
 
 
+def assert_state(is_acmd, cmd_idx, state):
+  if not is_acmd and cmd_idx == 0:
+    return
+
+  states_map = acmd_valid_states if is_acmd else cmd_valid_states
+  good_states = states_map[cmd_idx]
+  if state not in good_states:
+    msg = '{}CMD{} called not from one of expected states.\n'.format(
+      'A' if is_acmd else '',
+      cmd_idx)
+    good_states_list = ', '.join([card_states[i] for i in good_states])
+    msg += f'Allowed states are: {good_states_list}.\n'
+    msg += f'Current state: {card_states[state]}\n'
+    raise Exception(msg)
+
+
+def parse_r6(r: cmd_result):
+  rca   = (r.resp0 >> 16) & 0xffff
+  old_state = (r.resp0 >> 9) & 0xf
+
+  for i in range(0, 9):
+    if r.resp0 & (1<<i):
+      print(f'bit {i}')
+  if (r.resp0 >> 13) & 1:
+    print('bit 19')
+  if (r.resp0 >> 14) & 1:
+    print('bit 22')
+  if (r.resp0 >> 15) & 1:
+    print('bit 23')
+  print(f'prev_state={card_states[old_state]}, rca={rca}')
+  return rca, old_state
+
+
+class SD:
+  def __init__(self, sdhc: SDHC):
+    self.__sdhc = sdhc
+    self.__state = CARD_STATE_UNKNOWN
+
+
+  def do_cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp, data_size):
+    resp_type = cmd_resp_type(is_acmd, cmd_idx)
+    assert_state(is_acmd, cmd_idx, self.__state)
+    ret = self.__sdhc.cmd(is_acmd, cmd_idx, blksize, arg1, read_resp,
+      data_size)
+
+    if resp_type == RESP_TYPE_R6:
+      rca, old_state = parse_r6(ret)
+      if old_state != self.__state:
+        raise Exception('Prev state incorrect. assumed:{}, was:{}'.format(
+          card_states[self.__state], card_states[state]))
+
+    new_state = target_states(is_acmd, cmd_idx)
+    if new_state is not None and new_state != self.__state:
+      print('State change \'{}\'->\'{}\''.format(card_states[self.__state],
+        card_states[new_state]))
+      self.__state = new_state
+    else:
+      print('State is same \'{}\''.format(card_states[self.__state]))
+
+    return ret
+
   def cmd0(self):
-    return self.do_cmd(False, 0, 0, 0, read_resp=False, data_size=0)
+    # GO_IDLE_STATE 
+    ret = self.do_cmd(False, 0, 0, 0, read_resp=False, data_size=0)
+    self.__state = CARD_STATE_IDLE
+    return ret
 
   def cmd2(self):
     # ALL_SEND_CID
     ret = self.do_cmd(False, 2, 0, 0, read_resp=True, data_size=0)
+    self.__state = CARD_STATE_IDENTIFICATION
     print(f'CID: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
     print(f'CID: {ret.resp3:08x}{ret.resp2:08x}{ret.resp1:08x}{ret.resp0:08x}')
     cid_raw = (ret.resp3 << 96)|(ret.resp2 << 64)|(ret.resp1 << 32)|ret.resp0
@@ -481,26 +629,35 @@ class emmc:
   def cmd3(self):
     # SEND_RELATIVE_ADDR
     ret = self.do_cmd(False, 3, 0, 0, read_resp=True, data_size=0)
-    rca = (ret.resp0 >> 16) & 0xffff
-    state = (ret.resp0 >> 9) & 0xf
-    for i in range(0, 9):
-      if ret.resp0 & (1<<i):
-        print(f'bit {i}')
-    if (ret.resp0 >> 13) & 1:
-      print('bit 19')
-    if (ret.resp0 >> 14) & 1:
-      print('bit 22')
-    if (ret.resp0 >> 15) & 1:
-      print('bit 23')
-    print(f'state={card_states[state]}, rca={rca}')
+    rca, old_state = parse_r6(ret)
     return rca
+
+  def cmd6(self, mode, power_limit, drive_strength, cmd_sys, access_mode):
+    # SWITCH FUNCTION
+    arg =  (access_mode    & 0xf) << 0
+    arg |= (cmd_sys        & 0xf) << 4
+    arg |= (drive_strength & 0xf) << 8
+    arg |= (power_limit    & 0xf) << 12
+    arg |= 0xff << 16
+    arg |= (mode & 1) << 31
+
+    blksizecount = (1<<16) | 64
+    ret = self.do_cmd(False, 6, blksizecount, arg, read_resp=True, data_size=64)
+    data = [i for i in ret.data]
+    return data
 
   def cmd7(self, rca):
     # SELECT_CARD
     arg = (rca << 16) & 0xffffffff
-    return self.do_cmd(False, 7, 0, arg, read_resp=True, data_size=0)
+    ret = self.do_cmd(False, 7, 0, arg, read_resp=True, data_size=0)
+    self.__state = CARD_STATE_TRAN
+    return ret
 
   def cmd8(self):
+    # SEND_IF_COND
+    # Response type is R7, so no state information
+    # Possible only in IDLE state and returns to IDLE
+
     check_pattern = 0xdd
     vhs = 1
     arg = (1 << 8) | check_pattern
@@ -529,6 +686,11 @@ class emmc:
   def cmd55(self, rca):
     arg = (rca << 16) & 0xffffffff
     return self.do_cmd(False, 55, 0, arg, read_resp=True, data_size=0)
+
+  def cmd17(self, block_idx):
+    arg = block_idx
+    blksize = (1<<16) | 512
+    return self.do_cmd(False, 17, blksize, arg, read_resp=True, data_size=512)
 
   def acmd6(self, rca, bus_width_4):
     self.cmd55(rca)
@@ -640,6 +802,28 @@ def parse_csd(v):
   print(f'Max write data block length: {max_wr_block_len} ({1<<max_wr_block_len} bytes)')
 
 
+def parse_cmd6_check_data(check_data):
+  v = 0
+  for i, value in enumerate(check_data):
+    v = (v << 8) | value
+
+  print(f'{v:x}')
+  version = (v >> 368) & 0xff
+
+  fn_sel = [(v >> (376 + i * 4)) & 0xf for i in range(6)]
+  fn_supp = [(v >> (400 + i * 16)) & 0xffff for i in range(6)]
+  max_power = (v >> 496) & 0xffff
+
+  print(f'version: {version}')
+  string_sel  = [f'g{i+1}:{v:x}' for i, v in enumerate(fn_sel)]
+  string_supp = [f'g{i+1}:{v:04x}' for i, v in enumerate(fn_supp)]
+  
+  print(f'Selected functions: {string_sel}')
+  print(f'Supported functions: {string_supp}')
+  print(f'Max power: {max_power:04x}')
+  return fn_sel, fn_supp
+
+
 def do_main():
   port = '/dev/ttyACM1'
   baud_rate = 115200
@@ -656,24 +840,25 @@ def do_main():
     status = t.get_status()
 
 
-  m = emmc(t)
+  sdhc = SDHC(t)
+  m = SD(sdhc)
 
-  v = m.control1_read()
+  v = sdhc.control1_read()
   v &= ~(1<<2)
   v &= ~1
   v |= (1<<24)
-  m.control0_write(0)
-  m.control1_write(v)
-  m.control2_write(0)
+  sdhc.control0_write(0)
+  sdhc.control1_write(v)
+  sdhc.control2_write(0)
 
-  m.control0_read()
-  m.control1_read()
-  m.control2_read()
+  sdhc.control0_read()
+  sdhc.control1_read()
+  sdhc.control2_read()
 
-  m.set_clock(setup=True)
+  sdhc.set_clock(setup=True)
   print('EMMC clock set to setup speed')
-  m.status_read()
-  m.enable_sd_clock()
+  sdhc.status_read()
+  sdhc.enable_sd_clock()
   print('SD enabled')
   m.cmd0()
   m.cmd8()
@@ -697,33 +882,68 @@ def do_main():
   scr = m.acmd51(rca)
   parse_scr(scr)
   m.acmd6(rca, bus_width_4=True)
-  v = m.control0_read()
-  CONTROL0_DWIDTH4_BIT = 1<<1
+  v = sdhc.control0_read()
+  CONTROL0_DWIDTH4_BIT    = 1<<1
+  CONTROL0_HIGH_SPEED_BIT = 1<<2
   v |= CONTROL0_DWIDTH4_BIT
-  m.control0_write(v)
+  sdhc.control0_write(v)
+  time.sleep(0.7)
+  check_data = m.cmd6(CMD6_CHECK_FUNCTION, 0xf, 0xf, 0xf, 0xf)
+  fn_sel, fn_sup = parse_cmd6_check_data(check_data)
+  access_mode_sup_bits = fn_sup[0]
+  ACCESS_MODE_SUPP_SDR12  = 0
+  ACCESS_MODE_SUPP_SDR25  = 1
+  ACCESS_MODE_SUPP_SDR50  = 2
+  ACCESS_MODE_SUPP_SDR104 = 3
+  ACCESS_MODE_SUPP_DDR50  = 4
+  sdr25_ok = False
+  if access_mode_sup_bits & (1<<ACCESS_MODE_SUPP_SDR25):
+    sdr25_ok = True
 
-  m.interrupt_read()
-  m.status_read()
-  m.int_mask_read()
-  m.int_en_read()
+  print('sdr25: {}'.format('yes' if sdr25_ok else 'no'))
+  if sdr25_ok:
+    m.cmd6(CMD6_SWITCH_FUNCTION, 0xf, 0xf, 0xf, ACCESS_MODE_SUPP_SDR25)
+    fn_sel, fn_sup = parse_cmd6_check_data(check_data)
+  check_data = m.cmd6(CMD6_CHECK_FUNCTION, 0, 0, 0, 1)
+  fn_sel, fn_sup = parse_cmd6_check_data(check_data)
+  state = m.cmd13(rca)
+  v = sdhc.control0_read()
+  v |= CONTROL0_HIGH_SPEED_BIT
+  sdhc.control0_write(v)
+  print('HS bit is set')
+  time.sleep(0.5)
+  r = m.cmd17(0)
+  with open('/tmp/bin', 'wb') as f:
+    f.write(r.data)
 
-  m.arg2_read()
-  m.blkszcnt_read()
-  m.arg1_read()
-  m.cmdtm_read()
-  m.resp0_read()
-  m.resp1_read()
-  m.resp2_read()
-  m.resp3_read()
-  m.control0_read()
-  m.control0_read()
-  v = m.control0_read()
-  v = m.control1_read()
-  m.int_mask_read()
-  m.int_en_read()
-  m.control2_read()
-  m.caps_0_read()
-  m.caps_1_read()
+  sdhc.control0_read()
+  sdhc.sw_reset_cmd()
+  m.cmd0()
+  sdhc.control0_read()
+  sdhc.status_read()
+
+  sdhc.interrupt_read()
+  sdhc.status_read()
+  sdhc.int_mask_read()
+  sdhc.int_en_read()
+
+  sdhc.arg2_read()
+  sdhc.blkszcnt_read()
+  sdhc.arg1_read()
+  sdhc.cmdtm_read()
+  sdhc.resp0_read()
+  sdhc.resp1_read()
+  sdhc.resp2_read()
+  sdhc.resp3_read()
+  sdhc.control0_read()
+  sdhc.control0_read()
+  v = sdhc.control0_read()
+  v = sdhc.control1_read()
+  sdhc.int_mask_read()
+  sdhc.int_en_read()
+  sdhc.control2_read()
+  sdhc.caps_0_read()
+  sdhc.caps_1_read()
 
 
 def main():
