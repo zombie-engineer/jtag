@@ -282,6 +282,7 @@ class Target:
   def __init__(self, s):
     self.__status = TargetStatus()
     self.__s = s
+    self.__debug_tty = False
 
   def wait_cursor(self):
     line = ''
@@ -289,7 +290,6 @@ class Target:
     while True:
       c = self.__s.read().decode('utf-8')
       line += c
-      # print(f'line: "{repr(line)}", len={len(line)}, c={c}')
       if '>' in line:
         break
       if '\r\n' in line:
@@ -299,11 +299,10 @@ class Target:
         break
       if c == '>':
         break
-# if last_lines[-1] != '>':
-#        raise Exception(last_lines)
     if not last_lines[-1]:
       last_lines = last_lines[:-1]
-    print(last_lines)
+    if self.__debug_tty:
+      print(last_lines)
     return last_lines[-1]
 
   def to_cursor(self):
@@ -341,25 +340,33 @@ class Target:
     self.wait_cursor()
 
 
-EMMC_BASE = 0x3f300000
-EMMC_ARG2      = EMMC_BASE + 0x00
-EMMC_BLKSZCNT  = EMMC_BASE + 0x04
-EMMC_ARG1      = EMMC_BASE + 0x08
-EMMC_CMDTM     = EMMC_BASE + 0x0c
-EMMC_RESP0     = EMMC_BASE + 0x10
-EMMC_RESP1     = EMMC_BASE + 0x14
-EMMC_RESP2     = EMMC_BASE + 0x18
-EMMC_RESP3     = EMMC_BASE + 0x1c
-EMMC_DATA      = EMMC_BASE + 0x20
-EMMC_STATUS    = EMMC_BASE + 0x24
-EMMC_CONTROL0  = EMMC_BASE + 0x28
-EMMC_CONTROL1  = EMMC_BASE + 0x2c
-EMMC_INTERRUPT = EMMC_BASE + 0x30
-EMMC_INT_MASK  = EMMC_BASE + 0x34
-EMMC_INT_EN    = EMMC_BASE + 0x38
-EMMC_CONTROL2  = EMMC_BASE + 0x3c
-EMMC_CAPS_0    = EMMC_BASE + 0x40
-EMMC_CAPS_1    = EMMC_BASE + 0x44
+SDHC_BASE = 0x3f300000
+SDHC_ARG2      = SDHC_BASE + 0x00
+SDHC_BLKSZCNT  = SDHC_BASE + 0x04
+SDHC_ARG1      = SDHC_BASE + 0x08
+SDHC_CMDTM     = SDHC_BASE + 0x0c
+SDHC_RESP0     = SDHC_BASE + 0x10
+SDHC_RESP1     = SDHC_BASE + 0x14
+SDHC_RESP2     = SDHC_BASE + 0x18
+SDHC_RESP3     = SDHC_BASE + 0x1c
+SDHC_DATA      = SDHC_BASE + 0x20
+SDHC_STATUS    = SDHC_BASE + 0x24
+SDHC_CONTROL0  = SDHC_BASE + 0x28
+SDHC_CONTROL1  = SDHC_BASE + 0x2c
+SDHC_INTERRUPT = SDHC_BASE + 0x30
+SDHC_INT_MASK  = SDHC_BASE + 0x34
+SDHC_INT_EN    = SDHC_BASE + 0x38
+SDHC_CONTROL2  = SDHC_BASE + 0x3c
+SDHC_CAPS_0    = SDHC_BASE + 0x40
+SDHC_CAPS_1    = SDHC_BASE + 0x44
+
+SDHC_CONTROL1_INT_CLK_ENA       = 0
+SDHC_CONTROL1_INT_CLK_STABLE    = 1
+SDHC_CONTROL1_SD_CLK_ENA        = 2
+SDHC_CONTROL1_PLL_ENA           = 3
+SDHC_CONTROL1_CLK_GENERATOR_SEL = 4
+SDHC_CONTROL1_SDCLK_DIV_HI_BITS = 6
+SDHC_CONTROL1_SDCLK_DIV_LO_BITS = 8
 
 class cmd_result:
   def __init__(self, status, data, resp0, resp1, resp2, resp3):
@@ -375,76 +382,76 @@ class SDHC:
     self.__t = t
 
   def arg2_read(self):
-    return self.__t.mem_read32(EMMC_ARG2)
+    return self.__t.mem_read32(SDHC_ARG2)
 
   def blkszcnt_read(self):
-    return self.__t.mem_read32(EMMC_BLKSZCNT)
+    return self.__t.mem_read32(SDHC_BLKSZCNT)
 
   def blkszcnt_write(self, v):
-    self.__t.mem_write32(EMMC_BLKSZCNT, v)
+    self.__t.mem_write32(SDHC_BLKSZCNT, v)
 
   def arg1_read(self):
-    return self.__t.mem_read32(EMMC_ARG1)
+    return self.__t.mem_read32(SDHC_ARG1)
 
   def arg1_write(self, v):
-    return self.__t.mem_write32(EMMC_ARG1, v)
+    return self.__t.mem_write32(SDHC_ARG1, v)
 
   def cmdtm_read(self):
-    return self.__t.mem_read32(EMMC_CMDTM)
+    return self.__t.mem_read32(SDHC_CMDTM)
 
   def cmdtm_write(self, v):
-    return self.__t.mem_write32(EMMC_CMDTM, v)
+    return self.__t.mem_write32(SDHC_CMDTM, v)
 
   def resp0_read(self):
-    return self.__t.mem_read32(EMMC_RESP0)
+    return self.__t.mem_read32(SDHC_RESP0)
 
   def resp1_read(self):
-    return self.__t.mem_read32(EMMC_RESP1)
+    return self.__t.mem_read32(SDHC_RESP1)
 
   def resp2_read(self):
-    return self.__t.mem_read32(EMMC_RESP2)
+    return self.__t.mem_read32(SDHC_RESP2)
 
   def resp3_read(self):
-    return self.__t.mem_read32(EMMC_RESP3)
+    return self.__t.mem_read32(SDHC_RESP3)
 
   def data_read(self):
-    return self.__t.mem_read32(EMMC_DATA)
+    return self.__t.mem_read32(SDHC_DATA)
 
   def status_read(self):
-    return self.__t.mem_read32(EMMC_STATUS)
+    return self.__t.mem_read32(SDHC_STATUS)
 
   def control0_write(self, v):
-    self.__t.mem_write32(EMMC_CONTROL0, v)
+    self.__t.mem_write32(SDHC_CONTROL0, v)
 
   def control0_read(self):
-    return self.__t.mem_read32(EMMC_CONTROL0)
+    return self.__t.mem_read32(SDHC_CONTROL0)
 
   def control1_read(self):
-    return self.__t.mem_read32(EMMC_CONTROL1)
+    return self.__t.mem_read32(SDHC_CONTROL1)
 
   def control1_write(self, v):
-    self.__t.mem_write32(EMMC_CONTROL1, v)
+    self.__t.mem_write32(SDHC_CONTROL1, v)
 
   def interrupt_read(self):
-    return self.__t.mem_read32(EMMC_INTERRUPT)
+    return self.__t.mem_read32(SDHC_INTERRUPT)
 
   def int_mask_read(self):
-    return self.__t.mem_read32(EMMC_INT_MASK)
+    return self.__t.mem_read32(SDHC_INT_MASK)
 
   def int_en_read(self):
-    return self.__t.mem_read32(EMMC_INT_EN)
+    return self.__t.mem_read32(SDHC_INT_EN)
 
   def control2_read(self):
-    return self.__t.mem_read32(EMMC_CONTROL2)
+    return self.__t.mem_read32(SDHC_CONTROL2)
 
   def control2_write(self, v):
-    self.__t.mem_write32(EMMC_CONTROL2, v)
+    self.__t.mem_write32(SDHC_CONTROL2, v)
 
   def caps_0_read(self):
-    return self.__t.mem_read32(EMMC_CAPS_0)
+    return self.__t.mem_read32(SDHC_CAPS_0)
 
   def caps_1_read(self):
-    return self.__t.mem_read32(EMMC_CAPS_1)
+    return self.__t.mem_read32(SDHC_CAPS_1)
 
   def set_clock(self, setup):
 
@@ -476,9 +483,15 @@ class SDHC:
       if v & (1<<1):
         break
 
-  def enable_sd_clock(self):
+  def sd_clock_start(self):
     v = self.control1_read()
-    v |= 1 << 2
+    v |= 1 << SDHC_CONTROL1_SD_CLK_ENA
+    self.control1_write(v)
+    v = self.control1_read()
+
+  def sd_clock_stop(self):
+    v = self.control1_read()
+    v &= ~(1 << SDHC_CONTROL1_SD_CLK_ENA)
     self.control1_write(v)
     v = self.control1_read()
 
@@ -501,6 +514,51 @@ class SDHC:
       if ((v & (1<<24)) == 0):
         break
     print('emmc sw reset all done')
+
+  def internal_clock_stop(self):
+    v = self.control1_read()
+    v &= ~(1<<SDHC_CONTROL1_INT_CLK_ENA)
+    self.control1_write(v)
+    while True:
+      v = self.control1_read()
+      if (v & (1<<SDHC_CONTROL1_INT_CLK_STABLE)) == 0:
+        break
+
+  def internal_clock_start(self):
+    v = self.control1_read()
+    v |= 1 << SDHC_CONTROL1_INT_CLK_ENA
+    self.control1_write(v)
+    while True:
+      v = self.control1_read()
+      if (v & (1<<SDHC_CONTROL1_INT_CLK_STABLE)):
+        break
+
+  def set_bus_width4(self):
+    v = self.control0_read()
+    CONTROL0_DWIDTH4_BIT    = 1<<1
+    v |= CONTROL0_DWIDTH4_BIT
+    self.control0_write(v)
+    print('data bus width set to 4')
+
+  def set_high_speed(self):
+    v = self.control0_read()
+    CONTROL0_HIGH_SPEED_BIT = 1<<2
+    v |= CONTROL0_HIGH_SPEED_BIT
+    self.control0_write(v)
+    print('High speed bit is set')
+
+  def reset(self):
+    # Software reset.
+    self.sw_reset_all()
+    # Restart internal SDHC clock
+    self.internal_clock_stop()
+    self.internal_clock_start()
+    # Set CONTROL0 to default
+    self.control0_write(0)
+    # Set CONTROL1 to default
+    self.control2_write(0)
+    self.set_clock(setup=True)
+    self.sd_clock_start()
 
   def cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp=False, data_size=0):
     cmd_type = 'ACMD' if is_acmd else 'CMD'
@@ -528,13 +586,21 @@ class SDHC:
       resp3 = self.resp3_read()
 
     data = b''
-    for i in range(int(data_size / 4)):
-      print(i, int(data_size / 4))
+    num_words32 = int(data_size / 4)
+
+    for i in range(num_words32):
+      done = float(i) / num_words32
+      full = int(10 * done)
+      cursor = '=' * full + '>'
+
+      print(f'\r{cursor}{i}/{num_words32}', end='')
       while True:
         status = self.status_read()
         if status & (1<<9):
           break
       data += struct.pack('I', self.data_read())
+    if num_words32:
+      print()
 
     print('Finished CMD{}, resp {:08x} {:08x} {:08x} {:08x}, data:{}'.format(
       cmd_idx,
@@ -677,6 +743,7 @@ class SD:
     return csd_raw << 8
 
   def cmd13(self, rca):
+    # SEND_STATUS
     arg = (0<<15) | (rca << 16)
     ret = self.do_cmd(False, 13, 0, arg, read_resp=True, data_size=0)
     state = (ret.resp0 >> 9) & 0xf
@@ -688,11 +755,13 @@ class SD:
     return self.do_cmd(False, 55, 0, arg, read_resp=True, data_size=0)
 
   def cmd17(self, block_idx):
+    # READ_SINGLE_BLOCK
     arg = block_idx
     blksize = (1<<16) | 512
     return self.do_cmd(False, 17, blksize, arg, read_resp=True, data_size=512)
 
   def acmd6(self, rca, bus_width_4):
+    # SET_BUS_WIDTH
     self.cmd55(rca)
     arg = 2 if bus_width_4 else 0
     return self.do_cmd(True, 6, 0, arg, read_resp=True, data_size=0)
@@ -702,6 +771,7 @@ class SD:
     return self.do_cmd(True, 41, 0, arg, read_resp=True, data_size=0)
 
   def acmd51(self, rca):
+    # SEND_SCR
     self.cmd55(rca)
     arg = 0
     blksize = (1<<16) | 8
@@ -824,11 +894,9 @@ def parse_cmd6_check_data(check_data):
   return fn_sel, fn_supp
 
 
-def do_main():
-  port = '/dev/ttyACM1'
-  baud_rate = 115200
-  s = serial.Serial(port, baud_rate, timeout=100)
-  print(f"Opened {port} with baud rate {baud_rate}")
+def target_attach_and_halt(ttydev, baudrate):
+  s = serial.Serial(ttydev, baudrate, timeout=100)
+  print(f"Opened {ttydev} with baud rate {baudrate}")
   t = Target(s)
   t.update_status()
   status = t.get_status()
@@ -839,56 +907,43 @@ def do_main():
     t.halt()
     status = t.get_status()
 
-
   sdhc = SDHC(t)
-  m = SD(sdhc)
+  sd = SD(sdhc)
+  return sdhc, sd
 
-  v = sdhc.control1_read()
-  v &= ~(1<<2)
-  v &= ~1
-  v |= (1<<24)
-  sdhc.control0_write(0)
-  sdhc.control1_write(v)
-  sdhc.control2_write(0)
 
-  sdhc.control0_read()
-  sdhc.control1_read()
-  sdhc.control2_read()
+def sd_init_ident_mode(sd):
+  # Physical Layer Simplified Specification Version 9.00
+  # State machine to go through identification mode states to data transfer
+  # mode STANDBY state
 
-  sdhc.set_clock(setup=True)
-  print('EMMC clock set to setup speed')
-  sdhc.status_read()
-  sdhc.enable_sd_clock()
-  print('SD enabled')
-  m.cmd0()
-  m.cmd8()
-  ret = m.acmd41(rca=0, arg=0)
+  # CMD0 brings card to IDLE
+  sd.cmd0()
+  # CMD8 is mandatory part of init process
+  sd.cmd8()
+  # ACMD41 does IDLE->READY state transition
+  ret = sd.acmd41(rca=0, arg=0)
   arg = (ret.resp0 & 0x00ff8000) | (1<<30)
   while True:
-    ret = m.acmd41(rca=0, arg=0x40ff8000)
+    ret = sd.acmd41(rca=0, arg=0x40ff8000)
     if ret.resp0 & (1<<31):
       break
 
-  cid = m.cmd2()
+  # CMD2 SEND_ALL_CID to receive card's CID register contents
+  # CMD2 does READY->IDENT state transition
+  cid = sd.cmd2()
   parse_cid(cid)
-  rca = m.cmd3()
-  state = m.cmd13(rca)
+  # CMD3 SEND_RELATIVE_ADDR
+  # CMD3 does IDENT->STANDBY state transition
+  rca = sd.cmd3()
+  # CMD13 SEND_STATUS to ensure status is STANDBY
+  state = sd.cmd13(rca)
   if state != CARD_STATE_STANDBY:
     raise Exception('Failed to put card in \'standby\' state')
-  csd = m.cmd9(rca)
-  parse_csd(csd)
+  return rca
 
-  m.cmd7(rca)
-  scr = m.acmd51(rca)
-  parse_scr(scr)
-  m.acmd6(rca, bus_width_4=True)
-  v = sdhc.control0_read()
-  CONTROL0_DWIDTH4_BIT    = 1<<1
-  CONTROL0_HIGH_SPEED_BIT = 1<<2
-  v |= CONTROL0_DWIDTH4_BIT
-  sdhc.control0_write(v)
-  time.sleep(0.7)
-  check_data = m.cmd6(CMD6_CHECK_FUNCTION, 0xf, 0xf, 0xf, 0xf)
+def sd_set_high_speed(sd, sdhc):
+  check_data = sd.cmd6(CMD6_CHECK_FUNCTION, 0xf, 0xf, 0xf, 0xf)
   fn_sel, fn_sup = parse_cmd6_check_data(check_data)
   access_mode_sup_bits = fn_sup[0]
   ACCESS_MODE_SUPP_SDR12  = 0
@@ -902,48 +957,38 @@ def do_main():
 
   print('sdr25: {}'.format('yes' if sdr25_ok else 'no'))
   if sdr25_ok:
-    m.cmd6(CMD6_SWITCH_FUNCTION, 0xf, 0xf, 0xf, ACCESS_MODE_SUPP_SDR25)
+    sd.cmd6(CMD6_SWITCH_FUNCTION, 0xf, 0xf, 0xf, ACCESS_MODE_SUPP_SDR25)
     fn_sel, fn_sup = parse_cmd6_check_data(check_data)
-  check_data = m.cmd6(CMD6_CHECK_FUNCTION, 0, 0, 0, 1)
+  check_data = sd.cmd6(CMD6_CHECK_FUNCTION, 0, 0, 0, 1)
   fn_sel, fn_sup = parse_cmd6_check_data(check_data)
-  state = m.cmd13(rca)
-  v = sdhc.control0_read()
-  v |= CONTROL0_HIGH_SPEED_BIT
-  sdhc.control0_write(v)
-  print('HS bit is set')
+  sdhc.set_high_speed()
+
+
+def sd_init_data_transfer_mode(sd, sdhc, rca):
+  # Guide card through data transfer mode states into 'tran' state
+  # CMD9 SEND_CSD to get and parse CSD registers
+  csd = sd.cmd9(rca)
+  parse_csd(csd)
+  # CMD7 SELECT_CARD to select card, making it to 'tran' state
+  sd.cmd7(rca)
+  # ACMD51 SEND_SCR
+  scr = sd.acmd51(rca)
+  parse_scr(scr)
+  sd.acmd6(rca, bus_width_4=True)
+  sdhc.set_bus_width4()
+  sd_set_high_speed(sd, sdhc)
+
+
+def do_main():
+  sdhc, sd = target_attach_and_halt('/dev/ttyACM1', 115200 * 8)
+  sdhc.reset()
+  print('SDHC internal and SD clocks running')
+  rca = sd_init_ident_mode(sd)
+  sd_init_data_transfer_mode(sd, sdhc, rca)
   time.sleep(0.5)
-  r = m.cmd17(0)
+  r = sd.cmd17(0)
   with open('/tmp/bin', 'wb') as f:
     f.write(r.data)
-
-  sdhc.control0_read()
-  sdhc.sw_reset_cmd()
-  m.cmd0()
-  sdhc.control0_read()
-  sdhc.status_read()
-
-  sdhc.interrupt_read()
-  sdhc.status_read()
-  sdhc.int_mask_read()
-  sdhc.int_en_read()
-
-  sdhc.arg2_read()
-  sdhc.blkszcnt_read()
-  sdhc.arg1_read()
-  sdhc.cmdtm_read()
-  sdhc.resp0_read()
-  sdhc.resp1_read()
-  sdhc.resp2_read()
-  sdhc.resp3_read()
-  sdhc.control0_read()
-  sdhc.control0_read()
-  v = sdhc.control0_read()
-  v = sdhc.control1_read()
-  sdhc.int_mask_read()
-  sdhc.int_en_read()
-  sdhc.control2_read()
-  sdhc.caps_0_read()
-  sdhc.caps_1_read()
 
 
 def main():
