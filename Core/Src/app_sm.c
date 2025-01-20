@@ -355,6 +355,7 @@ static void msg(const char *fmt, ...)
 static bool special_symbol_active = false;
 static bool arrow_symbol_active = false;
 
+#define SYMBOL_BACKSPACE '\b'
 #define SYMBOL_ESCAPE 0x1b
 #define SYMBOL_ARROW 0x5b
 #define SYMBOL_ARROW_UP    0x41 // 'A'
@@ -410,7 +411,16 @@ static void app_handle_uart_rx(void)
     }
   }
 
-  if (c == SYMBOL_ESCAPE) {
+  if (c == SYMBOL_BACKSPACE) {
+    if (cmdbuf_cursor) {
+      cmdbuf_cursor--;
+
+      tx_fifo_push(SYMBOL_BACKSPACE);
+      tx_fifo_push(' ');
+      tx_fifo_push(SYMBOL_BACKSPACE);
+    }
+  }
+  else if (c == SYMBOL_ESCAPE) {
     special_symbol_active = true;
     return;
   }
@@ -429,7 +439,6 @@ static void app_handle_uart_rx(void)
     tx_fifo_push('\r');
     tx_fifo_push('\n');
     cmdbuf[cmdbuf_cursor] = 0;
-    // msg("executing '%s'\r\n", cmdbuf);
     success = cmdbuf_parse(&cmd);
 
     cmdbuf_cursor = 0;
@@ -441,7 +450,8 @@ static void app_handle_uart_rx(void)
     }
 
     osMessageQueuePut(cmd_queue_handle, &cmd, 0, 0);
-  } else {
+  }
+  else {
     cmdbuf[cmdbuf_cursor++] = c;
     tx_fifo_push(c);
     if (cmdbuf_cursor > cmdbuf_len)
@@ -563,12 +573,21 @@ void app_sm_process_next_cmd(void)
       msg("target initialized: %08x\r\n", t.idcode);
       break;
     case CMD_TARGET_HALT:
-      success = target_halt(&t);
-      msg("target halt status: %d\r\n", success ? 1 : 0);
+      if (!t.attached) {
+        msg("target not attached, can not halt\n");
+      }
+      else {
+        success = target_halt(&t);
+        msg("target halt status: %d\r\n", success ? 1 : 0);
+      }
       break;
     case CMD_TARGET_RESUME:
-      success = target_resume(&t);
-      msg("target resume status: %d\r\n", success ? 1 : 0);
+      if (target_is_halted(&t)) {
+        success = target_resume(&t);
+        msg("target resume status: %d\r\n", success ? 1 : 0);
+      } else {
+        msg("target not halted.\r\n");
+      }
       break;
     case CMD_TARGET_SOFT_RESET:
       success = target_soft_reset(&t);
