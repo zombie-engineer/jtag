@@ -50,7 +50,7 @@ struct aarch64 {
   struct aarch64_context ctx;
 };
 
-void aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
+bool aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
 bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr);

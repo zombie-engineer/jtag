@@ -71,11 +71,11 @@ static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)
     t->core[core_idx].etm = baseaddr;
     t->core[core_idx].etm_exists = true;
   }
-  // adiv5_mem_ap_read_word(baseaddr + 0x314, &reg0);
-  //adiv5_mem_ap_read_word(baseaddr + 0x088, &reg1);
+  // adiv5_mem_ap_read_word_e(baseaddr + 0x314, &reg0);
+  //adiv5_mem_ap_read_word_e(baseaddr + 0x088, &reg1);
 }
 
-static void target_parse_rom(struct target *t)
+static bool target_parse_rom(struct target *t)
 {
   int i;
   uint32_t mem_addr;
@@ -83,7 +83,7 @@ static void target_parse_rom(struct target *t)
   uint32_t rom_entries[ADIV5_MAX_ROM_ENTRIES] = { 0 };
 
   for (i = 0; i < ADIV5_MAX_ROM_ENTRIES; ++i) {
-    adiv5_mem_ap_read_word(&t->dap, t->dap.base + i * 4, &rom_entries[i]);
+    adiv5_mem_ap_read_word_e(&t->dap, t->dap.base + i * 4, &rom_entries[i]);
     if (!rom_entries[i])
       break;
   }
@@ -96,6 +96,7 @@ static void target_parse_rom(struct target *t)
     mem_addr = t->dap.base + (rom_entry & 0xfffff000);
     arm_cmsis_mem_ap_examine(t, mem_addr);
   }
+  return true;
 }
 
 bool target_core_exec(struct target_core *c, const uint32_t * const instr, int num)
@@ -142,7 +143,8 @@ bool raspberrypi_soft_reset(struct target *t)
   if (!target_core_write_mem32_once(&t->core[0], 0x3f100024, (0x5a << 24) | 1))
     return false;
 
-  if (!target_core_write_mem32_once(&t->core[0], 0x3f10001c, (0x5a << 24) | 0x20))
+  /* Write basicly should not complete */
+  if (target_core_write_mem32_once(&t->core[0], 0x3f10001c, (0x5a << 24) | 0x20))
     return false;
 
   return true;
@@ -150,64 +152,53 @@ bool raspberrypi_soft_reset(struct target *t)
 
 bool target_soft_reset(struct target *t)
 {
-  return raspberrypi_soft_reset(t);
+  if (raspberrypi_soft_reset(t)) {
+    t->attached = false;
+    t->core[0].halted = false;
+    return true;
+  }
+
+  return false;
 }
 
 bool target_init(struct target *t)
 {
   int i;
   int num_devs;
-#if 0
-  uint32_t words[2] = {
-    0xaabbccdd,
-    0x11223344
-  };
-  uint32_t test_words[2] = { 0, 0 };
-#endif
+  bool success;
 
   jtag_init();
   jtag_reset();
 
   num_devs = jtag_scan_num_devs();
-  t->idcode = jtag_read_idcode();
-  adiv5_dap_init(&t->dap);
+  if (!num_devs)
+    return false;
 
-  target_parse_rom(t);
+  t->idcode = jtag_read_idcode();
+  if (!t->idcode || t->idcode == 0xffffffff)
+    return false;
+
+  if (!adiv5_dap_init(&t->dap))
+    return false;
+
+  if (!target_parse_rom(t))
+    return false;
 
   t->core[0].cti = 0x80018000;
   t->core[1].cti = 0x80019000;
   t->core[2].cti = 0x8001a000;
   t->core[3].cti = 0x8001b000;
 
-  for (i = 0; i < 4; ++i)
-    aarch64_init(&t->core[i].a64, &t->dap, t->core[i].debug, t->core[i].cti);
+  success = true;
+  for (i = 0; i < 4 && success; ++i)
+    success = aarch64_init(&t->core[i].a64, &t->dap, t->core[i].debug,
+      t->core[i].cti);
 
-#if 0
-  int f = 1;
-  while(1) {
-    target_halt(t);
-    raspberrypi_soft_reset(t);
-    break;
-    if (!target_core_write_mem32_once(&t->core[0], 0x80000, 0xd1e2b374))
-      while(1);
-
-    if (!target_core_write_mem32(&t->core[0], 0x80000, words, 2))
-      while(1);
-
-    if (!target_core_read_mem32(&t->core[0], 0x80000, test_words, 2))
-      while(1);
-    if (f)
-      raspberrypi_soft_reset(t);
-    else
-      aarch64_mess(&t->core[0].a64, t->core[0].debug, t->core[0].cti);
-    target_resume(t);
-    f = 1;
+  if (success) {
+    t->attached = true;
+    t->core[0].halted = false;
   }
-
-#endif
-  t->attached = true;
-  t->core[0].halted = false;
-  return true;
+  return success;
 }
 
 bool target_mem_read_32(struct target *t, uint64_t addr, uint32_t *out)

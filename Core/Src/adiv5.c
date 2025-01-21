@@ -50,6 +50,120 @@ void adiv5_write_ir(struct adiv5_dap *d, uint8_t ir)
 
 #define CDBGRSTACK_NUM_REPS 5000
 
+static bool adiv5_write_select(struct adiv5_dap *d, int dpbank, int apbank,
+  int apsel)
+{
+  uint64_t select = (dpbank & 0xf)
+    | ((apbank & 0xf) << 4)
+    | ((apsel & 0xf) << 24);
+
+  if (select == d->select)
+    return true;
+
+  adiv5_write_ir(d, DPACC);
+
+  if (adiv5_reg_write(DP_REG_ADDR_SELECT, select)) {
+    d->select = select;
+    return true;
+  }
+
+  return false;
+}
+
+static inline bool adiv5_read_rdbuf_resp(struct adiv5_dap *d, uint32_t *out)
+{
+  uint64_t dap_response;
+  uint64_t dr_value;
+  int ack;
+
+  adiv5_write_ir(d, DPACC);
+  dr_value = ADI_ADDR_BITS(DP_REG_ADDR_RDBUFF) | ADI_READ_BIT;
+
+  for (int i = 0; i < 500; ++i) {
+    jtag_to_state(JTAG_STATE_SHIFT_DR);
+    jtag_shift(dr_value, &dap_response, ADI_MSG_LEN);
+    ack = dap_response & ADI_RESP_STATUS_MASK;
+    if (ack == ACK_OK) {
+      *out = ADI_RESP2DATA(dap_response);
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool adiv5_do_shift(struct adiv5_dap *d, int op, int addr,
+  uint32_t value_in, uint32_t *value_out)
+{
+  uint64_t dap_response;
+
+  uint64_t dr_value = (op == OP_READ ? ADI_READ_BIT : ADI_WRITE_BIT)
+    | ADI_ADDR_BITS(addr)
+    | (((uint64_t)(op == OP_WRITE ? value_in : 0)) << 3);
+
+  jtag_to_state(JTAG_STATE_SHIFT_DR);
+  jtag_shift(dr_value, &dap_response, 35);
+  return adiv5_read_rdbuf_resp(d, value_out);
+}
+
+static bool adiv5_transfer(struct adiv5_dap *d, int type, int op, int reg_addr,
+  uint32_t value_in, uint32_t *value_out)
+{
+  uint32_t v = 0;
+  int ap_bank = 0;
+  int dp_bank = 0;
+
+  int addr = reg_addr & 0xf;
+  if (type == DP)
+    dp_bank = (reg_addr >> 4) & 0xf;
+  else
+    ap_bank = (reg_addr >> 4) & 0xf;
+
+  if (op == OP_READ && !value_out)
+    return false;
+
+  if (!adiv5_write_select(d, dp_bank, ap_bank, 0))
+    return false;
+
+  if (type == DP)
+    adiv5_write_ir(d, DPACC);
+  else
+    adiv5_write_ir(d, APACC);
+
+  if (!adiv5_do_shift(d, op, addr, value_in, &v))
+    return false;
+
+  if (value_out)
+    *value_out = v;
+
+  return true;
+}
+
+/* Call adiv5_transfer with err checking */
+#define adiv5_transfer_e(d, t, o, r, vi, vo) \
+  do { \
+    if (!adiv5_transfer(d, t, o, r, vi, vo)) { \
+      return false; \
+    } \
+  } while(0);
+
+#define adiv5_dp_read(__reg, __out) \
+  adiv5_transfer_e(d, DP, OP_READ, DP_REG_ADDR_ ## __reg, 0, __out)
+
+#define adiv5_dp_write(__reg, __in, __out) \
+  adiv5_transfer_e(d, DP, OP_WRITE, DP_REG_ADDR_ ## __reg, __in, __out)
+
+#define adiv5_ap_read(__reg, __out) \
+  adiv5_transfer_e(d, AP, OP_READ, AP_REG_ADDR_ ## __reg, 0, __out)
+
+#define adiv5_ap_write(__reg, __in, __out) \
+  adiv5_transfer_e(d, AP, OP_WRITE, AP_REG_ADDR_ ## __reg, __in, __out)
+
+
+static inline bool adiv5_read_ctr_stat(struct adiv5_dap *d, uint32_t *out)
+{
+  return adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, out);
+}
+
 static bool adiv5_dap_dbg_power_up(struct adiv5_dap *d)
 {
   if (!adiv5_write_ctr_stat(d, d->ctl_stat |
@@ -133,89 +247,6 @@ bool adiv5_dap_reset(struct adiv5_dap *d)
   return false;
 }
 
-static inline bool adiv5_read_rdbuf_resp(struct adiv5_dap *d, uint32_t *out)
-{
-  uint64_t dap_response;
-  uint64_t dr_value;
-  int ack;
-
-  adiv5_write_ir(d, DPACC);
-  dr_value = ADI_ADDR_BITS(DP_REG_ADDR_RDBUFF) | ADI_READ_BIT;
-
-  while(1) {
-    jtag_to_state(JTAG_STATE_SHIFT_DR);
-    jtag_shift(dr_value, &dap_response, ADI_MSG_LEN);
-    ack = dap_response & ADI_RESP_STATUS_MASK;
-    if (ack == ACK_OK) {
-      *out = ADI_RESP2DATA(dap_response);
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool adiv5_do_shift(struct adiv5_dap *d, int op, int addr,
-  uint32_t value_in, uint32_t *value_out)
-{
-  uint64_t dap_response;
-
-  uint64_t dr_value = (op == OP_READ ? ADI_READ_BIT : ADI_WRITE_BIT)
-    | ADI_ADDR_BITS(addr)
-    | (((uint64_t)(op == OP_WRITE ? value_in : 0)) << 3);
-
-  jtag_to_state(JTAG_STATE_SHIFT_DR);
-  jtag_shift(dr_value, &dap_response, 35);
-  return adiv5_read_rdbuf_resp(d, value_out);
-}
-
-static bool adiv5_write_select(struct adiv5_dap *d, int dpbank, int apbank,
-  int apsel)
-{
-  uint64_t select = (dpbank & 0xf)
-    | ((apbank & 0xf) << 4)
-    | ((apsel & 0xf) << 24);
-
-  if (select == d->select)
-    return true;
-
-  adiv5_write_ir(d, DPACC);
-
-  if (adiv5_reg_write(DP_REG_ADDR_SELECT, select)) {
-    d->select = select;
-    return true;
-  }
-
-  return false;
-}
-
-bool adiv5_transfer(struct adiv5_dap *d, int type, int op, int reg_addr,
-  uint32_t value_in, uint32_t *value_out)
-{
-  uint32_t v = 0;
-  int ap_bank = 0;
-  int dp_bank = 0;
-
-  int addr = reg_addr & 0xf;
-  if (type == DP)
-    dp_bank = (reg_addr >> 4) & 0xf;
-  else
-    ap_bank = (reg_addr >> 4) & 0xf;
-
-  if (!adiv5_write_select(d, dp_bank, ap_bank, 0))
-    return false;
-
-  if (type == DP)
-    adiv5_write_ir(d, DPACC);
-  else
-    adiv5_write_ir(d, APACC);
-
-  if (!adiv5_do_shift(d, op, addr, value_in, &v))
-    return false;
-
-  *value_out = v;
-  return true;
-}
-
 bool adiv5_dap_init_power(struct adiv5_dap *d)
 {
   adiv5_write_ir(d, DPACC);
@@ -273,12 +304,13 @@ bool adiv5_reg_write(int addr, uint32_t value)
   return ack == ACK_OK;
 }
 
-static void adiv5_mem_ap_init(struct adiv5_dap *d)
+static bool adiv5_mem_ap_init(struct adiv5_dap *d)
 {
-  adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_CSW, 0, &d->csw);
-  adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_CSW,  d->csw | 0xffffffff, &d->csw);
-  adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_CSW, 0, &d->csw);
-  adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
+  adiv5_ap_read(CSW, &d->csw);
+  adiv5_ap_write(CSW,  d->csw | 0xffffffff, &d->csw);
+  adiv5_ap_read(CSW, &d->csw);
+  adiv5_dp_read(CTRL_STAT, &d->ctl_stat);
+  return true;
 }
 
 #define ADIV5_CSW_SIZE_POS     0
@@ -287,7 +319,8 @@ static void adiv5_mem_ap_init(struct adiv5_dap *d)
 #define ADIV5_CSW_SIZE_MASK     (7 << ADIV5_CSW_SIZE_POS)
 #define ADIV5_CSW_ADDRINCR_MASK (3 << ADIV5_CSW_ADDRINCR_POS)
 
-void adiv5_mem_ap_set_csw(struct adiv5_dap *d, int op_size, bool addrinc)
+#if 0
+bool adiv5_mem_ap_set_csw(struct adiv5_dap *d, int op_size, bool addrinc)
 {
   uint32_t new_csw = d->csw;
   new_csw &= ~ADIV5_CSW_SIZE_MASK;
@@ -311,103 +344,76 @@ void adiv5_mem_ap_set_csw(struct adiv5_dap *d, int op_size, bool addrinc)
 
   adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_CSW, new_csw, &d->csw);
 }
-
-#define EXIT_ON_FAIL() \
-  do { \
-    if (!success) \
-      return false; \
-  } while(0)
-
+#endif
 
 bool adiv5_dap_init(struct adiv5_dap *d)
 {
   uint32_t reg;
-  bool success;
 
   d->select = 0xffffffff;
   d->ir = 0xffffffff;
 
-  success = adiv5_dap_init_power(d);
-  EXIT_ON_FAIL();
+  if (!adiv5_dap_init_power(d))
+    return false;
 
-  success = adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_TARGETID, 0, &d->target_id);
-  EXIT_ON_FAIL();
-
-  success = adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_BASE, 0, &d->base);
-  EXIT_ON_FAIL();
-
-  success = adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_DPIDR, 0, &d->dpidr);
-  EXIT_ON_FAIL();
-
-  success = adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_DLPIDR, 0, &d->dlpidr);
-  EXIT_ON_FAIL();
-
-  success = adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_IDR, 0, &d->idr);
-  EXIT_ON_FAIL();
-
-  success = adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_CFG, 0, &reg);
-  EXIT_ON_FAIL();
-
-  success = adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
-  EXIT_ON_FAIL();
-
-  adiv5_mem_ap_init(d);
-  return true;
+  adiv5_dp_read(TARGETID, &d->target_id);
+  adiv5_ap_read(BASE, &d->base);
+  adiv5_dp_read(DPIDR, &d->dpidr);
+  adiv5_dp_read(DLPIDR, &d->dlpidr);
+  adiv5_ap_read(IDR, &d->idr);
+  adiv5_ap_read(CFG, &reg);
+  adiv5_dp_read(CTRL_STAT, &d->ctl_stat);
+  return adiv5_mem_ap_init(d);
 }
 
-void adiv5_mem_ap_read_word_drw(struct adiv5_dap *d, uint32_t addr,
+#if 0
+bool adiv5_mem_ap_read_word_drw(struct adiv5_dap *d, uint32_t addr,
   uint32_t *out)
 {
   uint32_t data = 0;
   uint32_t check_tar = 0;
 
-  adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_TAR, addr, &data);
-  adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_TAR, 0, &check_tar);
-  adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_DRW, 0, out);
-  adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
+  adiv5_transfer_e(d, AP, OP_WRITE, AP_REG_ADDR_TAR, addr, &data);
+  adiv5_transfer_e(d, AP, OP_READ, AP_REG_ADDR_TAR, 0, &check_tar);
+  adiv5_transfer_e(d, AP, OP_READ, AP_REG_ADDR_DRW, 0, out);
+  adiv5_transfer_e(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
   if (d->ctl_stat & 0x20) {
     last_success = false;
-    adiv5_transfer(d, DP, OP_WRITE, DP_REG_ADDR_CTRL_STAT, d->ctl_stat,
+    adiv5_transfer_e(d, DP, OP_WRITE, DP_REG_ADDR_CTRL_STAT, d->ctl_stat,
       &data);
 
-    adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
+    adiv5_transfer_e(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
   }
   else
     last_success = true;
+  return true;
 }
+#endif
 
-
-void adiv5_mem_ap_read_word(struct adiv5_dap *d, uint32_t addr, uint32_t *out)
+static inline bool adiv5_check_op_status(struct adiv5_dap *d)
 {
-  uint32_t data = 0;
-  uint32_t check_tar = 0;
-  adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_TAR, addr & 0xfffffff0, &data);
-  adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_TAR, 0, &check_tar);
-  adiv5_transfer(d, AP, OP_READ, AP_REG_ADDR_BD0 | (addr & 0xc), 0, out);
-  adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
+  adiv5_dp_read(CTRL_STAT, &d->ctl_stat);
   if (d->ctl_stat & 0x20) {
     last_success = false;
-    adiv5_transfer(d, DP, OP_WRITE, DP_REG_ADDR_CTRL_STAT, d->ctl_stat, &data);
-    adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
+    adiv5_dp_write(CTRL_STAT, d->ctl_stat, NULL);
+    adiv5_dp_read(CTRL_STAT, &d->ctl_stat);
+    return false;
   }
-  else
-    last_success = true;
+  last_success = true;
+  return true;
 }
 
+bool adiv5_mem_ap_read_word(struct adiv5_dap *d, uint32_t addr, uint32_t *out)
+{
+  adiv5_ap_write(TAR, addr & 0xfffffff0, NULL);
+  adiv5_ap_read(BD0 | (addr & 0xc), out);
+  return adiv5_check_op_status(d);
+}
 
-void adiv5_mem_ap_write_word(struct adiv5_dap *d, uint32_t addr,
+bool adiv5_mem_ap_write_word(struct adiv5_dap *d, uint32_t addr,
   uint32_t value)
 {
-  uint32_t data = 0;
-  adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_TAR, addr, &data);
-  adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_DRW, value, &data);
-  adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
-  if (d->ctl_stat & 0x20) {
-    adiv5_transfer(d, DP, OP_WRITE, DP_REG_ADDR_CTRL_STAT, d->ctl_stat, &data);
-    adiv5_transfer(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
-    last_success = false;
-  }
-  else
-    last_success = true;
+  adiv5_ap_write(TAR, addr, NULL);
+  adiv5_ap_write(DRW, value, NULL);
+  return adiv5_check_op_status(d);
 }
-
