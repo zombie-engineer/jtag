@@ -284,6 +284,11 @@ class Target:
     self.__s = s
     self.__debug_tty = False
 
+  def write(self, data):
+    data = (data + '\r\n').encode('utf-8')
+    # print(f'tty_write:{data}')
+    self.__s.write(data)
+
   def wait_cursor(self):
     line = ''
     last_lines = []
@@ -306,16 +311,16 @@ class Target:
     return last_lines[-1]
 
   def to_cursor(self):
-    self.__s.write('\r\n'.encode('utf-8'))
+    self.write('')
     self.wait_cursor()
 
   def init(self):
-    self.__s.write('init\r\n'.encode('utf-8'))
+    self.write('init')
     self.wait_cursor()
     self.update_status()
 
   def update_status(self):
-    self.__s.write('status\r\n'.encode('utf-8'))
+    self.write('status')
     status = self.wait_cursor().split(':')[1]
     self.__status.attached = 'not attached' not in status
     if self.__status.attached:
@@ -325,18 +330,18 @@ class Target:
     return self.__status
 
   def halt(self):
-    self.__s.write('halt\r\n'.encode('utf-8'))
+    self.write('halt')
     self.wait_cursor()
     self.update_status()
 
   def mem_read32(self, address):
-    self.__s.write(f'mrw 0x{address:08x}\r\n'.encode('utf-8'))
+    self.write(f'mrw 0x{address:08x}')
     lines = self.wait_cursor()
     value = int(lines, base=0)
     return value
 
   def mem_write32(self, address, value):
-    self.__s.write(f'mww 0x{address:08x} 0x{value:08x}\r\n'.encode('utf-8'))
+    self.write(f'mww 0x{address:08x} 0x{value:08x}')
     self.wait_cursor()
 
 
