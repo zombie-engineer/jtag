@@ -334,6 +334,11 @@ class Target:
     self.wait_cursor()
     self.update_status()
 
+  def reset(self):
+    self.write('srst')
+    self.wait_cursor()
+    self.update_status()
+
   def mem_read32(self, address):
     self.write(f'mrw 0x{address:08x}')
     lines = self.wait_cursor()
@@ -993,8 +998,7 @@ def sd_init_data_transfer_mode(sd, sdhc, rca):
   sd_set_high_speed(sd, sdhc)
 
 
-def do_main():
-  soc = target_attach_and_halt('/dev/ttyACM1', 115200 * 8)
+def action_sdhc(soc):
   sdhc = soc.sdhc
   sd = soc.sd
   sdhc.reset()
@@ -1006,14 +1010,26 @@ def do_main():
   with open('/tmp/bin', 'wb') as f:
     f.write(r.data)
 
+def do_main(action):
+  soc = target_attach_and_halt('/dev/ttyACM0', 115200 * 8)
 
-def main():
+  if action == 'rst':
+    soc.reset()
+  else:
+    action_sdhc(soc)
+  sys.exit(0)
+
+
+def main(action):
   try:
-    do_main()
+    do_main(action)
   except serial.SerialException as e:
     print(f"Serial error: {e}")
   except KeyboardInterrupt:
     print("Exiting program.")
 
 if __name__ == "__main__":
-    main()
+  action = ''
+  if len(sys.argv) > 1:
+    action = sys.argv[1]
+  main(action)
