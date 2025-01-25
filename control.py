@@ -784,6 +784,16 @@ class SD:
     return struct.unpack('>Q', ret.data)[0]
 
 
+class Soc:
+  def __init__(self, t: Target):
+    self.__t = t
+    self.sdhc = SDHC(self.__t)
+    self.sd = SD(self.sdhc)
+
+  def reset(self):
+    self.__t.reset()
+
+
 def parse_scr(v):
   print(f'SCR: 0x{v:016x}')
   scr_struct            = (v >> 60) & 0xf
@@ -912,9 +922,8 @@ def target_attach_and_halt(ttydev, baudrate):
     t.halt()
     status = t.get_status()
 
-  sdhc = SDHC(t)
-  sd = SD(sdhc)
-  return sdhc, sd
+  soc = Soc(t)
+  return soc
 
 
 def sd_init_ident_mode(sd):
@@ -985,7 +994,9 @@ def sd_init_data_transfer_mode(sd, sdhc, rca):
 
 
 def do_main():
-  sdhc, sd = target_attach_and_halt('/dev/ttyACM1', 115200 * 8)
+  soc = target_attach_and_halt('/dev/ttyACM1', 115200 * 8)
+  sdhc = soc.sdhc
+  sd = soc.sd
   sdhc.reset()
   print('SDHC internal and SD clocks running')
   rca = sd_init_ident_mode(sd)
