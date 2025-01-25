@@ -282,7 +282,7 @@ class Target:
   def __init__(self, s):
     self.__status = TargetStatus()
     self.__s = s
-    self.__debug_tty = False
+    self.__debug_tty = True
 
   def write(self, data):
     data = (data + '\r\n').encode('utf-8')
@@ -320,8 +320,14 @@ class Target:
     self.update_status()
 
   def update_status(self):
-    self.write('status')
-    status = self.wait_cursor().split(':')[1]
+    while True:
+      self.write('status')
+      status = self.wait_cursor()
+      print(status)
+      if status.strip():
+        break
+
+    status = status.split(':')[1]
     self.__status.attached = 'not attached' not in status
     if self.__status.attached:
       self.__status.halted = 'halted' in status
@@ -445,11 +451,20 @@ class SDHC:
   def interrupt_read(self):
     return self.__t.mem_read32(SDHC_INTERRUPT)
 
+  def interrupt_write(self, v):
+    self.__t.mem_write32(SDHC_INTERRUPT, v)
+
   def int_mask_read(self):
     return self.__t.mem_read32(SDHC_INT_MASK)
 
+  def int_mask_write(self, v):
+    self.__t.mem_write32(SDHC_INT_MASK, v)
+
   def int_en_read(self):
     return self.__t.mem_read32(SDHC_INT_EN)
+
+  def int_en_write(self, v):
+    self.__t.mem_write32(SDHC_INT_EN, v)
 
   def control2_read(self):
     return self.__t.mem_read32(SDHC_CONTROL2)
@@ -569,6 +584,22 @@ class SDHC:
     self.control2_write(0)
     self.set_clock(setup=True)
     self.sd_clock_start()
+    self.int_mask_write(0xffffffff)
+    self.int_en_write(0xffffffff)
+
+  def cmd_wait_intr_done(self):
+    INTR_CMD_DONE  = 1 << 0
+    INTR_DATA_DONE = 1 << 1
+    INTR_ERR       = 1 << 15
+
+    while True:
+      intr = self.interrupt_read()
+      if intr & INTR_CMD_DONE:
+        break
+      if intr & INTR_ERR:
+        break
+    self.interrupt_write(intr)
+
 
   def cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp=False, data_size=0):
     cmd_type = 'ACMD' if is_acmd else 'CMD'
@@ -581,8 +612,15 @@ class SDHC:
     self.blkszcnt_write(blksize)
 
     self.arg1_write(arg1)
+
+    intr = self.interrupt_read()
+    if intr:
+      print(f'clearing stale interrupt {intr:08x}')
+      self.interrupt_write(intr)
+
     self.cmdtm_write(gen_cmdtm(is_acmd, cmd_idx))
     status = self.status_read()
+    self.cmd_wait_intr_done()
     data = None
     resp0 = None
     resp1 = None
