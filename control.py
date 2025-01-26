@@ -309,7 +309,7 @@ class Target:
       last_lines = last_lines[:-1]
     if self.__debug_tty:
       print(last_lines)
-    return last_lines[-1]
+    return last_lines
 
   def to_cursor(self):
     self.write('')
@@ -324,7 +324,7 @@ class Target:
     while True:
       self.write('status')
       status = self.wait_cursor()
-      print(status)
+      status = status[-1]
       if status.strip():
         break
 
@@ -349,6 +349,7 @@ class Target:
   def mem_read32(self, address):
     self.write(f'mrw 0x{address:08x}')
     lines = self.wait_cursor()
+    lines = lines[-1]
     value = int(lines, base=0)
     return value
 
