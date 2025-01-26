@@ -337,6 +337,14 @@ class Target:
   def get_status(self):
     return self.__status
 
+  def dump_regs(self):
+    self.write('dumpregs')
+    lines = self.wait_cursor()
+    regs = lines[lines.index('dumpregs') + 1:lines.index('done')]
+    for regentry in regs:
+      core, name, value = regentry.split(',')
+      print(f'core {core}, {name}: {value}')
+
   def halt(self):
     self.write('halt')
     self.wait_cursor()
@@ -972,6 +980,7 @@ def target_attach_and_halt(ttydev, baudrate):
   if not status.halted:
     t.halt()
     status = t.get_status()
+  t.dump_regs()
 
   soc = Soc(t)
   return soc
