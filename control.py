@@ -286,7 +286,8 @@ class Target:
 
   def write(self, data):
     data = (data + '\r\n').encode('utf-8')
-    # print(f'tty_write:{data}')
+    if self.__debug_tty:
+      print(f'tty_write:{data}')
     self.__s.write(data)
 
   def wait_cursor(self):
