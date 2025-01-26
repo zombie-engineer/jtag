@@ -282,11 +282,12 @@ class Target:
   def __init__(self, s):
     self.__status = TargetStatus()
     self.__s = s
-    self.__debug_tty = True
+    self.debug_tty_read = False
+    self.__debug_tty_write = False
 
   def write(self, data):
     data = (data + '\r\n').encode('utf-8')
-    if self.__debug_tty:
+    if self.__debug_tty_write:
       print(f'tty_write:{data}')
     self.__s.write(data)
 
@@ -307,7 +308,7 @@ class Target:
         break
     if not last_lines[-1]:
       last_lines = last_lines[:-1]
-    if self.__debug_tty:
+    if self.debug_tty_read:
       print(last_lines)
     return last_lines
 
@@ -638,19 +639,24 @@ class SDHC:
     data = b''
     num_words32 = int(data_size / 4)
 
+    old_debug_value = self.__t.debug_tty_read
+    self.__t.debug_tty_read = False
     for i in range(num_words32):
       done = float(i) / num_words32
       full = int(10 * done)
       cursor = '=' * full + '>'
 
-      print(f'\r{cursor}{i}/{num_words32}', end='')
       while True:
         status = self.status_read()
+        print(f'\r{cursor}{i}/{num_words32} {status}', end='')
         if status & (1<<9):
           break
-      data += struct.pack('I', self.data_read())
+      d = self.data_read()
+      print(f'\r{cursor}{i}/{num_words32} {status:08x} {d:08x}', end='')
+      data += struct.pack('I', d)
     if num_words32:
       print()
+    self.__t.debug_tty_read = old_debug_value
 
     print('Finished CMD{}, resp {:08x} {:08x} {:08x} {:08x}, data:{}'.format(
       cmd_idx,
