@@ -46,9 +46,6 @@ struct fifo {
 
 /* Definitions for queue_cmd */
 static osMessageQueueId_t cmd_queue_handle;
-static osSemaphoreId_t tx_done_sema;
-static osSemaphoreId_t rx_sema;
-static osSemaphoreId_t tx_sema;
 
 static osMutexId_t msg_mutex;
 static osMutexId_t tx_mutex;
@@ -96,29 +93,23 @@ static const osMessageQueueAttr_t queue_cmd_attributes = {
   .mq_size = sizeof(queue_cmd_buf)
 };
 
-static StaticSemaphore_t rx_sema_cb;
-static const osSemaphoreAttr_t rx_sema_attr = {
-  .name = "rx_sema",
-  .attr_bits = 0,
-  .cb_mem = &rx_sema_cb,
-  .cb_size = sizeof(rx_sema_cb)
-};
+#define SEMA_STATIC(__name) \
+static StaticSemaphore_t __name ## _cb; \
+static const osSemaphoreAttr_t __name ## _attr = { \
+  .name = #__name, \
+  .attr_bits = 0, \
+  .cb_mem = &__name ## _cb, \
+  .cb_size = sizeof(__name ## _cb) \
+}; \
+static osSemaphoreId_t __name;
 
-static StaticSemaphore_t tx_sema_cb;
-static const osSemaphoreAttr_t tx_sema_attr = {
-  .name = "tx_sema",
-  .attr_bits = 0,
-  .cb_mem = &tx_sema_cb,
-  .cb_size = sizeof(tx_sema_cb)
-};
+#define SEMA_INIT(__name, __max, __init) \
+  __name = osSemaphoreNew(__max, __init, &__name ## _attr)
 
-static StaticSemaphore_t tx_done_sema_cb;
-static const osSemaphoreAttr_t tx_done_sema_attr = {
-  .name = "tx_done_sema",
-  .attr_bits = 0,
-  .cb_mem = &tx_done_sema_cb,
-  .cb_size = sizeof(tx_done_sema_cb)
-};
+SEMA_STATIC(tx_done_sema);
+SEMA_STATIC(tx_avail_sema);
+SEMA_STATIC(tx_free_sema);
+SEMA_STATIC(rx_sema);
 
 static uint8_t usb_rx_buf[RX_FIFO_SIZE];
 static uint8_t usb_tx_buf[TX_FIFO_SIZE];
@@ -156,14 +147,22 @@ static bool fifo_push(struct fifo *f, uint8_t ch)
   return true;
 }
 
+extern void Error_Handler(void);
+
 static inline bool tx_fifo_push(uint8_t ch)
 {
   bool success;
+
+  if (osSemaphoreAcquire(tx_free_sema, osWaitForever) != osOK)
+    Error_Handler();
+
   portENTER_CRITICAL();
   success = fifo_push(&uart_fifo_tx, ch);
   portEXIT_CRITICAL();
-  if (success)
-    osSemaphoreRelease(tx_sema);
+  if (success) {
+    if (osSemaphoreRelease(tx_avail_sema) != osOK)
+      Error_Handler();
+  }
   return success;
 }
 
@@ -173,12 +172,16 @@ static int uart_tx_fifo_push(const uint8_t *msg, size_t len)
   osMutexAcquire(tx_mutex, osWaitForever);
 
   for (i = 0; i < len; ++i) {
-    if (!tx_fifo_push(msg[i]))
-      break;
+    while(1) {
+      if (tx_fifo_push(msg[i]))
+        break;
+    }
   }
   osMutexRelease(tx_mutex);
   return i;
 }
+
+#define msg_push(__msg, __l) uart_tx_fifo_push((const uint8_t *)__msg, __l)
 
 static bool fifo_pop(struct fifo *f, uint8_t *ch)
 {
@@ -223,24 +226,23 @@ app_sm_state_t appstate;
 
 static void app_prompt(void)
 {
-  portENTER_CRITICAL();
-  tx_fifo_push('\r');
-  tx_fifo_push('\n');
-  tx_fifo_push('>');
-  portEXIT_CRITICAL();
+  msg_push("\r\n>", 3);
 }
 
 void app_sm_init(void)
 {
+  struct cmd c;
+
   appstate = SM_IDLING;
 
   /* creation of queue_cmd */
   cmd_queue_handle = osMessageQueueNew (2, sizeof(struct cmd),
     &queue_cmd_attributes);
 
-  rx_sema = osSemaphoreNew(sizeof(usb_rx_buf), 0, &rx_sema_attr);
-  tx_sema = osSemaphoreNew(sizeof(usb_tx_buf), 0, &tx_sema_attr);
-  tx_done_sema = osSemaphoreNew(1, 0, &tx_done_sema_attr);
+  SEMA_INIT(rx_sema      , sizeof(usb_rx_buf), 0);
+  SEMA_INIT(tx_avail_sema, sizeof(usb_tx_buf), 0);
+  SEMA_INIT(tx_free_sema , sizeof(usb_tx_buf), sizeof(usb_tx_buf));
+  SEMA_INIT(tx_done_sema , 1, 0);
 
   msg_mutex = osMutexNew(NULL);
   tx_mutex = osMutexNew(NULL);
@@ -250,7 +252,9 @@ void app_sm_init(void)
 
   /* creation of task_uart_tx */
   task_uart_txHandle = osThreadNew(task_fn_uart_tx, NULL, &task_uart_tx_attributes);
-  app_prompt();
+
+  c.cmd = CMD_NONE;
+  osMessageQueuePut(cmd_queue_handle, &c, 0, 0);
 }
 
 void app_on_new_chars(const uint8_t *buf, size_t len)
@@ -414,10 +418,7 @@ static void app_handle_uart_rx(void)
   if (c == SYMBOL_BACKSPACE) {
     if (cmdbuf_cursor) {
       cmdbuf_cursor--;
-
-      tx_fifo_push(SYMBOL_BACKSPACE);
-      tx_fifo_push(' ');
-      tx_fifo_push(SYMBOL_BACKSPACE);
+      msg_push("\b \b", 3);
     }
   }
   else if (c == SYMBOL_ESCAPE) {
@@ -436,8 +437,7 @@ static void app_handle_uart_rx(void)
       return;
     }
 
-    tx_fifo_push('\r');
-    tx_fifo_push('\n');
+    msg_push("\r\n", 2);
     cmdbuf[cmdbuf_cursor] = 0;
     success = cmdbuf_parse(&cmd);
 
@@ -474,10 +474,11 @@ static void app_handle_uart_tx(void)
   if (!uart_tx_is_ready())
     return;
 
-  osSemaphoreAcquire(tx_sema, osWaitForever);
+  osSemaphoreAcquire(tx_avail_sema, osWaitForever);
   portENTER_CRITICAL();
   success = fifo_pop(&uart_fifo_tx, &c);
   portEXIT_CRITICAL();
+  osSemaphoreRelease(tx_free_sema);
   if (!success)
     return;
 
@@ -501,7 +502,7 @@ void task_fn_uart_tx(void *argument)
 
 void Error_Handler(void);
 
-void app_process_mem_read_32(struct target *t, struct cmd *c)
+static void app_process_mem_read_32(struct target *t, struct cmd *c)
 {
   uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
   uint32_t value = 0;
@@ -512,7 +513,7 @@ void app_process_mem_read_32(struct target *t, struct cmd *c)
     msg("mem read 32 failed\r\n");
 }
 
-void app_process_mem_write_32(struct target *t, struct cmd *c)
+static void app_process_mem_write_32(struct target *t, struct cmd *c)
 {
   uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
   if (target_mem_write_32(t, addr, c->arg2))
