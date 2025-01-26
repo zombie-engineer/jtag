@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "common.h"
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -26,6 +27,7 @@ typedef enum {
   CMD_TARGET_SOFT_RESET   = 5,
   CMD_TARGET_MEM_READ_32  = 6,
   CMD_TARGET_MEM_WRITE_32 = 7,
+  CMD_TARGET_DUMP_REGS    = 8,
   CMD_UNKNOWN
 } cmd_t;
 
@@ -317,6 +319,10 @@ static bool cmdbuf_parse(struct cmd *c)
     c->cmd = CMD_TARGET_STATUS;
     return true;
   }
+  if (!strncmp(p, "dumpregs", 8)) {
+    c->cmd = CMD_TARGET_DUMP_REGS;
+    return true;
+  }
   if (!strncmp(p, "init", 4)) {
     c->cmd = CMD_TARGET_INIT;
     return true;
@@ -522,6 +528,42 @@ static void app_process_mem_write_32(struct target *t, struct cmd *c)
     msg("mem write 32 failed\r\n");
 }
 
+void app_process_dump_regs(struct target *t)
+{
+  int i, j;
+  struct target_core *c;
+  struct aarch64_context *core_ctx;
+  if (!t->attached) {
+    msg("error: not attached\r\n");
+    return;
+  }
+
+/*
+ * STMCube c lib does not support uint64_t printing, so we have to split the
+ * number to 2 by 32
+ */
+#define REG64_FMT "0x%08x%08x"
+#define REG64_ARG(__v64) \
+    (int)(((__v64) >> 32) & 0xffffffff), (int)((__v64) & 0xffffffff)
+
+#define PRINT_REG64(__core, __idx, __v64) \
+    msg("%d,x%d," REG64_FMT "\r\n", __core, __idx, REG64_ARG(__v64))
+
+  for (i = 0; i < ARRAY_SIZE(t->core); ++i) {
+    c = &t->core[i];
+    if (!c->halted)
+      continue;
+    core_ctx = &c->a64.ctx;
+    for (j = 0; j < ARRAY_SIZE(core_ctx->x0_30); ++j) {
+      msg("%d,x%d," REG64_FMT "\r\n", i, j, REG64_ARG(core_ctx->x0_30[j]));
+    }
+
+    msg("%d,sp," REG64_FMT "\r\n", i, REG64_ARG(core_ctx->sp));
+    msg("%d,pc," REG64_FMT "\r\n", i, REG64_ARG(core_ctx->pc));
+  }
+  msg("done\r\n");
+}
+
 #define msgbuf_push(__ptr, __s) \
   do { \
     strcpy(__ptr, __s); \
@@ -599,6 +641,9 @@ void app_sm_process_next_cmd(void)
       break;
     case CMD_TARGET_MEM_WRITE_32:
       app_process_mem_write_32(&t, &cmd);
+      break;
+    case CMD_TARGET_DUMP_REGS:
+      app_process_dump_regs(&t);
       break;
     default:
       break;
