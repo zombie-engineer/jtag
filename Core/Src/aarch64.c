@@ -122,44 +122,6 @@ bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   return aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
 }
 
-#define AARCH64_CORE_REG_X0 0
-#define AARCH64_CORE_REG_X1 1
-#define AARCH64_CORE_REG_X2 2
-#define AARCH64_CORE_REG_X3 3
-#define AARCH64_CORE_REG_X4 4
-#define AARCH64_CORE_REG_X5 5
-#define AARCH64_CORE_REG_X6 6
-#define AARCH64_CORE_REG_X7 7
-#define AARCH64_CORE_REG_X8 8
-#define AARCH64_CORE_REG_X9 9
-#define AARCH64_CORE_REG_X10 10
-#define AARCH64_CORE_REG_X11 11
-#define AARCH64_CORE_REG_X12 12
-#define AARCH64_CORE_REG_X13 13
-#define AARCH64_CORE_REG_X14 14
-#define AARCH64_CORE_REG_X15 15
-#define AARCH64_CORE_REG_X16 16
-#define AARCH64_CORE_REG_X17 17
-#define AARCH64_CORE_REG_X18 18
-#define AARCH64_CORE_REG_X19 19
-#define AARCH64_CORE_REG_X20 20
-#define AARCH64_CORE_REG_X21 21
-#define AARCH64_CORE_REG_X22 22
-#define AARCH64_CORE_REG_X23 23
-#define AARCH64_CORE_REG_X24 24
-#define AARCH64_CORE_REG_X25 25
-#define AARCH64_CORE_REG_X26 26
-#define AARCH64_CORE_REG_X27 27
-#define AARCH64_CORE_REG_X28 28
-#define AARCH64_CORE_REG_X29 29
-#define AARCH64_CORE_REG_X30 30
-#define AARCH64_CORE_REG_PC  31
-#define AARCH64_CORE_REG_SP  32
-#define AARCH64_CORE_REG_SCTLR_EL1 33
-#define AARCH64_CORE_REG_ESR_EL2   34
-#define AARCH64_CORE_REG_FAR_EL2   35
-#define AARCH64_CORE_REG_DISR_EL1  36
-
 /*
  * 4-byte Aarch64 instruction that MOVes contents of register Xn to
  * DBGDTR_EL0, with 'n' - being register index from 0 to 30,
@@ -245,25 +207,25 @@ static bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
   return true;
 }
 
-static bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  int reg, uint64_t value)
+bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
+  uint64_t value)
 {
   uint32_t instructions[2];
   int num_i;
 
-  if (reg >= AARCH64_CORE_REG_X0 && reg <= AARCH64_CORE_REG_X30) {
+  if (reg_id >= AARCH64_CORE_REG_X0 && reg_id <= AARCH64_CORE_REG_X30) {
     /* msr dbgdtr_el0, xN, where N==reg*/
-    instructions[0] = AARCH64_INSTR_MRS_DBGDTR_EL0(reg);
+    instructions[0] = AARCH64_INSTR_MRS_DBGDTR_EL0(reg_id);
     num_i = 1;
   }
-#if 0
-  else if (reg == AARCH64_CORE_REG_PC) {
+  else if (reg_id == AARCH64_CORE_REG_PC) {
     /* mrs x0, dlr_el0 */
     instructions[0] = 0xd53b4520;
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
     num_i = 2;
   }
+#if 0
   else if (reg == AARCH64_CORE_REG_SP) {
     /* mov x0, sp */
     instructions[0] = 0x910003e0;

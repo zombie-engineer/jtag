@@ -27,7 +27,8 @@ typedef enum {
   CMD_TARGET_SOFT_RESET   = 5,
   CMD_TARGET_MEM_READ_32  = 6,
   CMD_TARGET_MEM_WRITE_32 = 7,
-  CMD_TARGET_DUMP_REGS    = 8,
+  CMD_TARGET_REG_WRITE_64 = 8,
+  CMD_TARGET_DUMP_REGS    = 9,
   CMD_UNKNOWN
 } cmd_t;
 
@@ -299,6 +300,91 @@ static inline bool cmdbuf_parse_mww(struct cmd *c, const char *p)
   return true;
 }
 
+#define is_digit10(__c) (__c >= '0' && __c <= '9')
+static inline bool is_valid_regname_symbol(char c)
+{
+  return is_digit10(c)
+    || (c >= 'a' && c <= 'z')
+    || (c >= 'A' && c <= 'Z')
+    || c == '_';
+}
+
+static inline bool cmdbuf_parse_rw(struct cmd *cmd, const char *p)
+{
+  uint64_t v;
+  int i0 = 0;
+  int i = 0;
+  int n;
+  char c;
+  int reg_id;
+
+  while (1) {
+    if (i0 > 24)
+      return false;
+
+    c = p[i0];
+    if (!c)
+      return false;
+
+    if (c != ' ')
+      break;
+
+    i0++;
+  }
+
+  i = i0;
+  /* parsing register name, staring from numeric is invalid */
+  if (is_digit10(c))
+    return false;
+  
+  while(1) {
+    /* We want to leave space in reg for last '\0' */
+    if (i - i0 > 24)
+      return false;
+
+    if (c == ' ')
+      break;
+
+    if (!is_valid_regname_symbol(c))
+      return false;
+
+    i++;
+    c = p[i];
+  }
+
+  if (p[i0] == 'x') {
+    int x_reg_index;
+    for (n = i0 + 1; n < i; ++i) {
+      if (!is_digit10(p[n]))
+        return false;
+    }
+    int num_digits = n - i0 - 1;
+    if (!num_digits || num_digits > 2)
+      return false;
+    x_reg_index = (p[i0 + 1] - '0');
+    if (num_digits == 2)
+      x_reg_index = x_reg_index * 10 + (p[i0 + 1] - '0');
+
+    reg_id = AARCH64_CORE_REG_X0 + x_reg_index;
+  }
+  else if (p[i0] == 'p' && p[i0 + 1] == 'c') {
+    reg_id = AARCH64_CORE_REG_PC;
+  }
+  else if (p[i0] == 's' && p[i0 + 1] == 'p') {
+    reg_id = AARCH64_CORE_REG_SP;
+  }
+  else
+    return false;
+
+  p += i;
+  v = strtoll(p, (char **)&p, 0);
+  cmd->cmd = CMD_TARGET_REG_WRITE_64;
+  cmd->arg0 = reg_id;
+  cmd->arg1 = v & 0xffffffff;
+  cmd->arg2 = (v >> 32) & 0xffffffff;
+  return true;
+}
+
 static bool cmdbuf_parse(struct cmd *c)
 {
   size_t n;
@@ -344,6 +430,9 @@ static bool cmdbuf_parse(struct cmd *c)
   }
   else if (!strncmp(p, "mww ", 4)) {
     return cmdbuf_parse_mww(c, p + 4);
+  }
+  else if (!strncmp(p, "rw ", 3)) {
+    return cmdbuf_parse_rw(c, p + 3);
   }
 
   return false;
@@ -528,6 +617,15 @@ static void app_process_mem_write_32(struct target *t, struct cmd *c)
     msg("mem write 32 failed\r\n");
 }
 
+static void app_process_reg_write_64(struct target *t, struct cmd *c)
+{
+  uint64_t regvalue = (((uint64_t)(c->arg2)) << 32) | c->arg1;
+  if (target_reg_write_64(t, c->arg0, regvalue))
+    msg("done\r\n");
+  else
+    msg("mem write 32 failed\r\n");
+}
+
 void app_process_dump_regs(struct target *t)
 {
   int i, j;
@@ -641,6 +739,9 @@ void app_sm_process_next_cmd(void)
       break;
     case CMD_TARGET_MEM_WRITE_32:
       app_process_mem_write_32(&t, &cmd);
+      break;
+    case CMD_TARGET_REG_WRITE_64:
+      app_process_reg_write_64(&t, &cmd);
       break;
     case CMD_TARGET_DUMP_REGS:
       app_process_dump_regs(&t);

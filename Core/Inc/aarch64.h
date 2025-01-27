@@ -3,6 +3,45 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+#define AARCH64_CORE_REG_X0 0
+#define AARCH64_CORE_REG_X1 1
+#define AARCH64_CORE_REG_X2 2
+#define AARCH64_CORE_REG_X3 3
+#define AARCH64_CORE_REG_X4 4
+#define AARCH64_CORE_REG_X5 5
+#define AARCH64_CORE_REG_X6 6
+#define AARCH64_CORE_REG_X7 7
+#define AARCH64_CORE_REG_X8 8
+#define AARCH64_CORE_REG_X9 9
+#define AARCH64_CORE_REG_X10 10
+#define AARCH64_CORE_REG_X11 11
+#define AARCH64_CORE_REG_X12 12
+#define AARCH64_CORE_REG_X13 13
+#define AARCH64_CORE_REG_X14 14
+#define AARCH64_CORE_REG_X15 15
+#define AARCH64_CORE_REG_X16 16
+#define AARCH64_CORE_REG_X17 17
+#define AARCH64_CORE_REG_X18 18
+#define AARCH64_CORE_REG_X19 19
+#define AARCH64_CORE_REG_X20 20
+#define AARCH64_CORE_REG_X21 21
+#define AARCH64_CORE_REG_X22 22
+#define AARCH64_CORE_REG_X23 23
+#define AARCH64_CORE_REG_X24 24
+#define AARCH64_CORE_REG_X25 25
+#define AARCH64_CORE_REG_X26 26
+#define AARCH64_CORE_REG_X27 27
+#define AARCH64_CORE_REG_X28 28
+#define AARCH64_CORE_REG_X29 29
+#define AARCH64_CORE_REG_X30 30
+#define AARCH64_CORE_REG_PC  31
+#define AARCH64_CORE_REG_SP  32
+#define AARCH64_CORE_REG_SCTLR_EL1 33
+#define AARCH64_CORE_REG_ESR_EL2   34
+#define AARCH64_CORE_REG_FAR_EL2   35
+#define AARCH64_CORE_REG_DISR_EL1  36
+
+
 struct adiv5_dap;
 
 struct aarch64_context {
@@ -76,3 +115,5 @@ bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t value);
 bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t *out_value);
+bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
+  uint64_t value);

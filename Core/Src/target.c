@@ -134,6 +134,14 @@ bool target_core_write_mem32_once(struct target_core *c, uint64_t dstaddr,
   return aarch64_write_mem32_once(&c->a64, c->debug, dstaddr, value);
 }
 
+bool target_core_reg_write64(struct target_core *c, int reg_id, uint64_t value)
+{
+  if (!c->halted)
+    return false;
+
+  return aarch64_write_core_reg(&c->a64, c->debug, reg_id, value);
+}
+
 bool raspberrypi_soft_reset(struct target *t)
 {
     /* Raspberry PI reset sequence */
@@ -209,4 +217,9 @@ bool target_mem_read_32(struct target *t, uint64_t addr, uint32_t *out)
 bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value)
 {
   return target_core_write_mem32_once(&t->core[0], addr, value);
+}
+
+bool target_reg_write_64(struct target *t, int reg_id, uint64_t value)
+{
+  return target_core_reg_write64(&t->core[0], reg_id, value);
 }

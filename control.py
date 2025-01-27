@@ -345,6 +345,15 @@ class Target:
       core, name, value = regentry.split(',')
       print(f'core {core}, {name}: {value}')
 
+  def write_reg(self, regname, value):
+    self.write(f'rw {regname} {value}')
+    self.wait_cursor()
+
+  def resume(self):
+    self.write('resume')
+    self.wait_cursor()
+    self.update_status()
+
   def halt(self):
     self.write('halt')
     self.wait_cursor()
@@ -852,6 +861,11 @@ class Soc:
   def reset(self):
     self.__t.reset()
 
+  def resume(self):
+    self.__t.write_reg('pc', 0x80014 + 4)
+    self.__t.resume()
+    raise Exception()
+
 
 def parse_scr(v):
   print(f'SCR: 0x{v:016x}')
@@ -1053,6 +1067,12 @@ def sd_init_data_transfer_mode(sd, sdhc, rca):
   sd_set_high_speed(sd, sdhc)
 
 
+def read_sector(sd):
+  r = sd.cmd17(0)
+  with open('/tmp/bin', 'wb') as f:
+    f.write(r.data)
+
+
 def action_sdhc(soc):
   sdhc = soc.sdhc
   sd = soc.sd
@@ -1060,16 +1080,15 @@ def action_sdhc(soc):
   print('SDHC internal and SD clocks running')
   rca = sd_init_ident_mode(sd)
   sd_init_data_transfer_mode(sd, sdhc, rca)
-  time.sleep(0.5)
-  r = sd.cmd17(0)
-  with open('/tmp/bin', 'wb') as f:
-    f.write(r.data)
+  # read_sector(0, '/tmp/bin')
+
 
 def do_main(action):
-  soc = target_attach_and_halt('/dev/ttyACM0', 115200 * 8)
-
+  soc = target_attach_and_halt('/dev/ttyACM1', 115200 * 8)
   if action == 'rst':
     soc.reset()
+  if action == 'resume':
+    soc.resume()
   else:
     action_sdhc(soc)
   sys.exit(0)
