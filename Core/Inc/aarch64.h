@@ -40,6 +40,7 @@
 #define AARCH64_CORE_REG_ESR_EL2   34
 #define AARCH64_CORE_REG_FAR_EL2   35
 #define AARCH64_CORE_REG_DISR_EL1  36
+#define AARCH64_CORE_REG_UNKNOWN 0xffff
 
 
 struct adiv5_dap;
@@ -117,3 +118,9 @@ bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t *out_value);
 bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
   uint64_t value);
+bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
+  uint64_t *out);
+bool aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
+  uint64_t addr);
+bool aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t *value);

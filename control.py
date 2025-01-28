@@ -349,6 +349,11 @@ class Target:
     self.write(f'rw {regname} {value}')
     self.wait_cursor()
 
+  def read_reg(self, regname):
+    self.write(f'rr {regname}')
+    lines = self.wait_cursor()
+    return lines
+
   def resume(self):
     self.write('resume')
     self.wait_cursor()
@@ -374,6 +379,11 @@ class Target:
   def mem_write32(self, address, value):
     self.write(f'mww 0x{address:08x} 0x{value:08x}')
     self.wait_cursor()
+
+  def mem_read(self, address, size):
+    self.write(f'mr 0x{address:08x} {size}')
+    lines = self.wait_cursor()
+    print(lines)
 
 
 SDHC_BASE = 0x3f300000
@@ -863,6 +873,9 @@ class Soc:
 
   def resume(self):
     self.__t.write_reg('pc', 0x80014 + 4)
+    self.__t.write_reg('x0', 0x80014)
+    print(self.__t.read_reg('x0'))
+    print(self.__t.read_reg('pc'))
     self.__t.resume()
     raise Exception()
 
@@ -995,6 +1008,7 @@ def target_attach_and_halt(ttydev, baudrate):
     t.halt()
     status = t.get_status()
   t.dump_regs()
+  t.mem_read(0x80000, 24)
 
   soc = Soc(t)
   return soc
@@ -1086,9 +1100,12 @@ def action_sdhc(soc):
 def do_main(action):
   soc = target_attach_and_halt('/dev/ttyACM1', 115200 * 8)
   if action == 'rst':
+    print('resetting')
     soc.reset()
   if action == 'resume':
     soc.resume()
+  if action == 'halt':
+    pass
   else:
     action_sdhc(soc)
   sys.exit(0)

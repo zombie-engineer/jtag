@@ -125,6 +125,22 @@ bool target_core_read_mem32(struct target_core *c, uint64_t srcaddr,
   return aarch64_read_mem32_once(&c->a64, c->debug, srcaddr, dst);
 }
 
+bool target_core_mem_read_fast_start(struct target_core *c, uint64_t addr)
+{
+  if (!c->halted)
+    return false;
+
+  return aarch64_read_mem32_fast_start(&c->a64, c->debug, addr);
+}
+
+bool target_core_mem_read_fast_next(struct target_core *c, uint32_t *value)
+{
+  if (!c->halted)
+    return false;
+
+  return aarch64_read_mem32_fast_next(&c->a64, c->debug, value);
+}
+
 bool target_core_write_mem32_once(struct target_core *c, uint64_t dstaddr,
     uint32_t value)
 {
@@ -140,6 +156,14 @@ bool target_core_reg_write64(struct target_core *c, int reg_id, uint64_t value)
     return false;
 
   return aarch64_write_core_reg(&c->a64, c->debug, reg_id, value);
+}
+
+bool target_core_reg_read64(struct target_core *c, int reg_id, uint64_t *out)
+{
+  if (!c->halted)
+    return false;
+
+  return aarch64_read_core_reg(&c->a64, c->debug, reg_id, out);
 }
 
 bool raspberrypi_soft_reset(struct target *t)
@@ -222,4 +246,19 @@ bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value)
 bool target_reg_write_64(struct target *t, int reg_id, uint64_t value)
 {
   return target_core_reg_write64(&t->core[0], reg_id, value);
+}
+
+bool target_reg_read_64(struct target *t, int reg_id, uint64_t *out)
+{
+  return target_core_reg_read64(&t->core[0], reg_id, out);
+}
+
+bool target_mem_read_fast_start(struct target *t, uint64_t addr)
+{
+  return target_core_mem_read_fast_start(&t->core[0], addr);
+}
+
+bool target_mem_read_fast_next(struct target *t, uint32_t *value)
+{
+  return target_core_mem_read_fast_next(&t->core[0], value);
 }

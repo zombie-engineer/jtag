@@ -33,4 +33,7 @@ bool target_soft_reset(struct target *t);
 bool target_mem_read_32(struct target *t, uint64_t addr, uint32_t *out);
 bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value);
 bool target_reg_write_64(struct target *t, int reg_id, uint64_t value);
+bool target_reg_read_64(struct target *t, int reg_id, uint64_t *out);
 bool target_exec_instr(struct target *t, uint32_t instr);
+bool target_mem_read_fast_start(struct target *t, uint64_t addr);
+bool target_mem_read_fast_next(struct target *t, uint32_t *value);

@@ -133,8 +133,30 @@ bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
  */
 #define AARCH64_INSTR_MSR_DBGDTR_EL0(__r) (0xd5130400 | (__r & 0x1f))
 #define AARCH64_INSTR_MRS_DBGDTR_EL0(__r) (0xd5330400 | (__r & 0x1f))
+#define op0 19
+#define op1 16
+#define CRn 12
+#define CRm 8
+#define op2 5
 
-static bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
+#define MRSMSR_SYSREG(_op0, _op1, _CRn, _CRm, _op2) \
+      (_op0 << op0) \
+    | (_op1 << op1) \
+    | (_CRn << CRn) \
+    | (_CRm << CRm) \
+    | (_op2 << op2) \
+
+#define DBGDTR_EL0 MRSMSR_SYSREG(0b10, 0b011,      0, 0b0100,     0)
+#define DLR_EL0    MRSMSR_SYSREG(0b11, 0b011, 0b0100, 0b0101, 0b001)
+#define X0         0
+
+#define AARCH64_I_MSR(__dstreg, __srcreg) \
+  (0xd5100000 | __dstreg | (__srcreg & 0x1f))
+
+#define AARCH64_I_MRS(__dstreg, __srcreg) \
+  (0xd5300000 | __srcreg | (__dstreg & 0x1f))
+
+bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
   int reg, uint64_t *out_reg)
 {
   uint32_t tmp_lo = 0, tmp_hi = 0;
@@ -144,14 +166,14 @@ static bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
 
   if (reg >= AARCH64_CORE_REG_X0 && reg <= AARCH64_CORE_REG_X30) {
     /* msr dbgdtr_el0, xN, where N==reg*/
-    instructions[0] = AARCH64_INSTR_MSR_DBGDTR_EL0(reg);
+    instructions[0] = AARCH64_I_MSR(DBGDTR_EL0, reg);
     num_i = 1;
   }
   else if (reg == AARCH64_CORE_REG_PC) {
     /* mrs x0, dlr_el0 */
-    instructions[0] = 0xd53b4520;
+    instructions[0] = AARCH64_I_MRS(X0, DLR_EL0);
     /* msr dbgdtr_el0, x0 */
-    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    instructions[1] = AARCH64_I_MSR(DBGDTR_EL0, X0);
     num_i = 2;
   }
   else if (reg == AARCH64_CORE_REG_SP) {
@@ -219,10 +241,10 @@ bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
     num_i = 1;
   }
   else if (reg_id == AARCH64_CORE_REG_PC) {
-    /* mrs x0, dlr_el0 */
-    instructions[0] = 0xd53b4520;
-    /* msr dbgdtr_el0, x0 */
-    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    /* mrs x0, dbgdtr_el0 */
+    instructions[0] = AARCH64_I_MRS(X0, DBGDTR_EL0);
+    /* msr dlr_el0, x0 */
+    instructions[1] = AARCH64_I_MSR(DLR_EL0, X0);
     num_i = 2;
   }
 #if 0
@@ -380,8 +402,10 @@ bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
     &a->regs.edscr);
 
   if (aarch64_edscr_is_error(a->regs.edscr)) {
-    adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDRCR, (1<<2)|(1<<3));
-    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
+    adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDRCR,
+      (1<<2)|(1<<3));
+    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+      &a->regs.edscr);
     aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
     return false;
   }
@@ -390,6 +414,37 @@ bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
     return false;
 
   *out_value = reg & 0xffffffff;
+  return true;
+}
+
+bool aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
+  uint64_t addr)
+{
+  uint32_t tmp;
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return false;
+
+  if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr))
+    return false;
+
+  adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
+    AARCH64_I_MSR(DBGDTR_EL0, X0));
+
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+
+  if (!aarch64_set_memory_mode(a, baseaddr))
+    return false;
+
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp);
+  return true;
+}
+
+bool aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t *value)
+{
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
+      value);
   return true;
 }
 

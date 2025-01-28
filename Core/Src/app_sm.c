@@ -16,6 +16,14 @@
 #define RX_FIFO_SIZE 256
 #define TX_FIFO_SIZE 256
 
+/*
+ * STMCube c lib does not support uint64_t printing, so we have to split the
+ * number to 2 by 32
+ */
+#define VALUE64_FMT "0x%08x%08x"
+#define VALUE64_ARG(__v64) \
+    (int)(((__v64) >> 32) & 0xffffffff), (int)((__v64) & 0xffffffff)
+
 struct target t;
 
 typedef enum {
@@ -27,8 +35,10 @@ typedef enum {
   CMD_TARGET_SOFT_RESET   = 5,
   CMD_TARGET_MEM_READ_32  = 6,
   CMD_TARGET_MEM_WRITE_32 = 7,
-  CMD_TARGET_REG_WRITE_64 = 8,
-  CMD_TARGET_DUMP_REGS    = 9,
+  CMD_TARGET_MEM_READ     = 8,
+  CMD_TARGET_REG_WRITE_64 = 9,
+  CMD_TARGET_REG_READ_64  = 10,
+  CMD_TARGET_DUMP_REGS    = 11,
   CMD_UNKNOWN
 } cmd_t;
 
@@ -288,6 +298,20 @@ static inline bool cmdbuf_parse_mrw(struct cmd *c, const char *p)
   return true;
 }
 
+static inline bool cmdbuf_parse_mr(struct cmd *c, const char *p)
+{
+  uint64_t addr;
+  uint32_t size;
+  char *next;
+  c->cmd = CMD_TARGET_MEM_READ;
+  addr = strtol(p, (char **)&p, 0);
+  size = strtol(p, NULL, 0);
+  c->arg0 = addr & 0xffffffff;
+  c->arg1 = (addr >> 32) & 0xffffffff;
+  c->arg2 = size;
+  return true;
+}
+
 static inline bool cmdbuf_parse_mww(struct cmd *c, const char *p)
 {
   uint64_t addr;
@@ -309,22 +333,23 @@ static inline bool is_valid_regname_symbol(char c)
     || c == '_';
 }
 
-static inline bool cmdbuf_parse_rw(struct cmd *cmd, const char *p)
+static inline int parse_reg_name(const char **ptr)
 {
-  uint64_t v;
+  int n;
   int i0 = 0;
   int i = 0;
-  int n;
+  const char *p = *ptr;
   char c;
-  int reg_id;
+
+  int reg_id = AARCH64_CORE_REG_UNKNOWN;
 
   while (1) {
     if (i0 > 24)
-      return false;
+      goto out_err;
 
     c = p[i0];
     if (!c)
-      return false;
+      goto out_err;
 
     if (c != ' ')
       break;
@@ -335,18 +360,20 @@ static inline bool cmdbuf_parse_rw(struct cmd *cmd, const char *p)
   i = i0;
   /* parsing register name, staring from numeric is invalid */
   if (is_digit10(c))
-    return false;
-  
+    goto out_err;
+
   while(1) {
+    if (!c)
+      break;
     /* We want to leave space in reg for last '\0' */
     if (i - i0 > 24)
-      return false;
+      goto out_err;
 
     if (c == ' ')
       break;
 
     if (!is_valid_regname_symbol(c))
-      return false;
+      goto out_err;
 
     i++;
     c = p[i];
@@ -354,34 +381,62 @@ static inline bool cmdbuf_parse_rw(struct cmd *cmd, const char *p)
 
   if (p[i0] == 'x') {
     int x_reg_index;
-    for (n = i0 + 1; n < i; ++i) {
+    for (n = i0 + 1; n < i; ++n) {
       if (!is_digit10(p[n]))
-        return false;
+        goto out_err;
     }
     int num_digits = n - i0 - 1;
     if (!num_digits || num_digits > 2)
-      return false;
+      goto out_err;
+
     x_reg_index = (p[i0 + 1] - '0');
     if (num_digits == 2)
       x_reg_index = x_reg_index * 10 + (p[i0 + 1] - '0');
 
     reg_id = AARCH64_CORE_REG_X0 + x_reg_index;
+    goto out;
   }
-  else if (p[i0] == 'p' && p[i0 + 1] == 'c') {
+
+  if (p[i0] == 'p' && p[i0 + 1] == 'c') {
     reg_id = AARCH64_CORE_REG_PC;
+    goto out;
   }
-  else if (p[i0] == 's' && p[i0 + 1] == 'p') {
+
+  if (p[i0] == 's' && p[i0 + 1] == 'p') {
     reg_id = AARCH64_CORE_REG_SP;
+    goto out;
   }
-  else
+
+out:
+  *ptr += i;
+
+out_err:
+  return reg_id;
+}
+
+static inline bool cmdbuf_parse_rw(struct cmd *cmd, const char *p)
+{
+  uint64_t v;
+  int reg_id = parse_reg_name(&p);
+  if (reg_id == AARCH64_CORE_REG_UNKNOWN)
     return false;
 
-  p += i;
   v = strtoll(p, (char **)&p, 0);
   cmd->cmd = CMD_TARGET_REG_WRITE_64;
   cmd->arg0 = reg_id;
   cmd->arg1 = v & 0xffffffff;
   cmd->arg2 = (v >> 32) & 0xffffffff;
+  return true;
+}
+
+static inline bool cmdbuf_parse_rr(struct cmd *cmd, const char *p)
+{
+  int reg_id = parse_reg_name(&p);
+  if (reg_id == AARCH64_CORE_REG_UNKNOWN)
+    return false;
+
+  cmd->cmd = CMD_TARGET_REG_READ_64;
+  cmd->arg0 = reg_id;
   return true;
 }
 
@@ -428,11 +483,17 @@ static bool cmdbuf_parse(struct cmd *c)
   else if (!strncmp(p, "mrw ", 4)) {
     return cmdbuf_parse_mrw(c, p + 4);
   }
+  else if (!strncmp(p, "mr ", 3)) {
+    return cmdbuf_parse_mr(c, p + 3);
+  }
   else if (!strncmp(p, "mww ", 4)) {
     return cmdbuf_parse_mww(c, p + 4);
   }
   else if (!strncmp(p, "rw ", 3)) {
     return cmdbuf_parse_rw(c, p + 3);
+  }
+  else if (!strncmp(p, "rr ", 3)) {
+    return cmdbuf_parse_rr(c, p + 3);
   }
 
   return false;
@@ -597,10 +658,18 @@ void task_fn_uart_tx(void *argument)
 
 void Error_Handler(void);
 
+#define CHECK_ATTACHED() \
+  if (!t->attached) { \
+    msg("error: not attached\r\n"); \
+    return; \
+  }
+
 static void app_process_mem_read_32(struct target *t, struct cmd *c)
 {
   uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
   uint32_t value = 0;
+
+  CHECK_ATTACHED();
 
   if (target_mem_read_32(t, addr, &value))
     msg("0x%08x\r\n", value);
@@ -608,9 +677,35 @@ static void app_process_mem_read_32(struct target *t, struct cmd *c)
     msg("mem read 32 failed\r\n");
 }
 
+static void app_process_mem_read(struct target *t, struct cmd *c)
+{
+  uint32_t value = 0;
+  uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
+  int num_reads = (c->arg2 + 3) / 4;
+  CHECK_ATTACHED();
+
+  if (!target_mem_read_fast_start(t, addr)) {
+    msg("error\r\n");
+    return;
+  }
+
+  for (int i = 0; i < num_reads; ++i) {
+    if (!target_mem_read_fast_next(t, &value)) {
+      msg("error\r\n");
+      break;
+    }
+    msg("0x%08x\r\n", value);
+  }
+  msg("done\r\n");
+}
+
+
 static void app_process_mem_write_32(struct target *t, struct cmd *c)
 {
   uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
+
+  CHECK_ATTACHED();
+
   if (target_mem_write_32(t, addr, c->arg2))
     msg("done\r\n");
   else
@@ -620,10 +715,24 @@ static void app_process_mem_write_32(struct target *t, struct cmd *c)
 static void app_process_reg_write_64(struct target *t, struct cmd *c)
 {
   uint64_t regvalue = (((uint64_t)(c->arg2)) << 32) | c->arg1;
+
+  CHECK_ATTACHED();
+
   if (target_reg_write_64(t, c->arg0, regvalue))
     msg("done\r\n");
   else
     msg("mem write 32 failed\r\n");
+}
+
+static void app_process_reg_read_64(struct target *t, struct cmd *c)
+{
+  uint64_t value = 0;
+  CHECK_ATTACHED();
+
+  if (target_reg_read_64(t, c->arg0, &value))
+    msg("done:" VALUE64_FMT "\r\n", VALUE64_ARG(value));
+  else
+    msg("mem read 32 failed\r\n");
 }
 
 void app_process_dump_regs(struct target *t)
@@ -631,21 +740,8 @@ void app_process_dump_regs(struct target *t)
   int i, j;
   struct target_core *c;
   struct aarch64_context *core_ctx;
-  if (!t->attached) {
-    msg("error: not attached\r\n");
-    return;
-  }
 
-/*
- * STMCube c lib does not support uint64_t printing, so we have to split the
- * number to 2 by 32
- */
-#define REG64_FMT "0x%08x%08x"
-#define REG64_ARG(__v64) \
-    (int)(((__v64) >> 32) & 0xffffffff), (int)((__v64) & 0xffffffff)
-
-#define PRINT_REG64(__core, __idx, __v64) \
-    msg("%d,x%d," REG64_FMT "\r\n", __core, __idx, REG64_ARG(__v64))
+  CHECK_ATTACHED();
 
   for (i = 0; i < ARRAY_SIZE(t->core); ++i) {
     c = &t->core[i];
@@ -653,11 +749,11 @@ void app_process_dump_regs(struct target *t)
       continue;
     core_ctx = &c->a64.ctx;
     for (j = 0; j < ARRAY_SIZE(core_ctx->x0_30); ++j) {
-      msg("%d,x%d," REG64_FMT "\r\n", i, j, REG64_ARG(core_ctx->x0_30[j]));
+      msg("%d,x%d," VALUE64_FMT "\r\n", i, j, VALUE64_ARG(core_ctx->x0_30[j]));
     }
 
-    msg("%d,sp," REG64_FMT "\r\n", i, REG64_ARG(core_ctx->sp));
-    msg("%d,pc," REG64_FMT "\r\n", i, REG64_ARG(core_ctx->pc));
+    msg("%d,sp," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->sp));
+    msg("%d,pc," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->pc));
   }
   msg("done\r\n");
 }
@@ -742,6 +838,12 @@ void app_sm_process_next_cmd(void)
       break;
     case CMD_TARGET_REG_WRITE_64:
       app_process_reg_write_64(&t, &cmd);
+      break;
+    case CMD_TARGET_REG_READ_64:
+      app_process_reg_read_64(&t, &cmd);
+      break;
+    case CMD_TARGET_MEM_READ:
+      app_process_mem_read(&t, &cmd);
       break;
     case CMD_TARGET_DUMP_REGS:
       app_process_dump_regs(&t);
