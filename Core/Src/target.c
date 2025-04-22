@@ -24,6 +24,10 @@ bool target_core_resume(struct target_core *c)
   if (!c->halted)
     return false;
 
+  success = aarch64_restore_before_resume(&c->a64, c->debug);
+  if (!success)
+    return false;
+
   success = aarch64_resume(&c->a64, c->debug, c->cti);
   if (success)
     c->halted = false;
@@ -141,6 +145,14 @@ bool target_core_mem_read_fast_next(struct target_core *c, uint32_t *value)
   return aarch64_read_mem32_fast_next(&c->a64, c->debug, value);
 }
 
+bool target_core_mem_read_fast_stop(struct target_core *c)
+{
+  if (!c->halted)
+    return false;
+
+  return aarch64_read_mem32_fast_stop(&c->a64, c->debug);
+}
+
 bool target_core_write_mem32_once(struct target_core *c, uint64_t dstaddr,
     uint32_t value)
 {
@@ -150,7 +162,8 @@ bool target_core_write_mem32_once(struct target_core *c, uint64_t dstaddr,
   return aarch64_write_mem32_once(&c->a64, c->debug, dstaddr, value);
 }
 
-bool target_core_reg_write64(struct target_core *c, int reg_id, uint64_t value)
+bool target_core_reg_write64(struct target_core *c, uint32_t reg_id,
+  uint64_t value)
 {
   if (!c->halted)
     return false;
@@ -158,7 +171,8 @@ bool target_core_reg_write64(struct target_core *c, int reg_id, uint64_t value)
   return aarch64_write_core_reg(&c->a64, c->debug, reg_id, value);
 }
 
-bool target_core_reg_read64(struct target_core *c, int reg_id, uint64_t *out)
+bool target_core_reg_read64(struct target_core *c, uint32_t reg_id,
+  uint64_t *out)
 {
   if (!c->halted)
     return false;
@@ -243,12 +257,12 @@ bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value)
   return target_core_write_mem32_once(&t->core[0], addr, value);
 }
 
-bool target_reg_write_64(struct target *t, int reg_id, uint64_t value)
+bool target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value)
 {
   return target_core_reg_write64(&t->core[0], reg_id, value);
 }
 
-bool target_reg_read_64(struct target *t, int reg_id, uint64_t *out)
+bool target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out)
 {
   return target_core_reg_read64(&t->core[0], reg_id, out);
 }
@@ -261,4 +275,9 @@ bool target_mem_read_fast_start(struct target *t, uint64_t addr)
 bool target_mem_read_fast_next(struct target *t, uint32_t *value)
 {
   return target_core_mem_read_fast_next(&t->core[0], value);
+}
+
+bool target_mem_read_fast_stop(struct target *t)
+{
+  return target_core_mem_read_fast_stop(&t->core[0]);
 }

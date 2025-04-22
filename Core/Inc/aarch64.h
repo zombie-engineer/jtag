@@ -40,6 +40,7 @@
 #define AARCH64_CORE_REG_ESR_EL2   34
 #define AARCH64_CORE_REG_FAR_EL2   35
 #define AARCH64_CORE_REG_DISR_EL1  36
+#define AARCH64_CORE_REGS_COUNT    37
 #define AARCH64_CORE_REG_UNKNOWN 0xffff
 
 
@@ -50,6 +51,7 @@ struct aarch64_context {
   uint64_t sp;
   uint64_t x0_30[31];
   uint64_t sctlr_el1;
+  uint64_t dirty_mask;
   int el;
   int pstate;
   bool mmu_on;
@@ -103,6 +105,8 @@ bool aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
 bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
+bool aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
+
 void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
@@ -116,11 +120,12 @@ bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t value);
 bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t *out_value);
-bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
-  uint64_t value);
-bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
-  uint64_t *out);
+bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t value);
+bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t *out);
 bool aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr);
 bool aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
   uint32_t *value);
+bool aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr);

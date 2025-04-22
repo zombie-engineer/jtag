@@ -100,6 +100,66 @@ bool aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
   return true;
 }
 
+static inline bool aarch64_ctx_get_reg(struct aarch64_context *ctx,
+  uint32_t reg_id, uint64_t *out)
+{
+  if (reg_id < AARCH64_CORE_REG_X30) {
+    *out = ctx->x0_30[reg_id];
+    return true;
+  }
+  if (reg_id == AARCH64_CORE_REG_PC) {
+    *out = ctx->pc;
+    return true;
+  }
+  if (reg_id == AARCH64_CORE_REG_SP) {
+    *out = ctx->sp;
+    return true;
+  }
+
+  return false;
+}
+
+static inline bool aarch64_restore_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id)
+{
+  uint64_t value;
+
+  if (!(a->ctx.dirty_mask & 1))
+    return true;
+
+  /* Ignore request to restore PC, because it is restored from DLR_EL0 */
+  if (reg_id == AARCH64_CORE_REG_PC)
+    return true;
+
+  if (!aarch64_ctx_get_reg(&a->ctx, reg_id, &value))
+    return false;
+
+  if (!aarch64_write_core_reg(a, baseaddr, reg_id, value))
+    return false;
+
+  return true;
+}
+
+bool aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr)
+{
+  uint32_t i;
+
+  if (!a->ctx.dirty_mask)
+    return true;
+
+  /*
+   * Because we are going to restore something, we are going to dirty X0, so
+   * exclude it now to restore it as the last step
+   */
+  a->ctx.dirty_mask >>= 1;
+  for (i = 1; i < AARCH64_CORE_REGS_COUNT; ++i) {
+    if (!aarch64_restore_reg(a, baseaddr, i))
+      return false;
+    a->ctx.dirty_mask >>= 1;
+  }
+  return aarch64_restore_reg(a, baseaddr, AARCH64_CORE_REG_X0);
+}
+
 bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr)
 {
@@ -156,8 +216,8 @@ bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
 #define AARCH64_I_MRS(__dstreg, __srcreg) \
   (0xd5300000 | __srcreg | (__dstreg & 0x1f))
 
-bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  int reg, uint64_t *out_reg)
+bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
+  uint64_t *out_reg)
 {
   uint32_t tmp_lo = 0, tmp_hi = 0;
 
@@ -209,6 +269,7 @@ bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
   else
     return false;
 
+  a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   for (int i = 0; i < num_i; ++i) {
     adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
       instructions[i]);
@@ -229,15 +290,16 @@ bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
   return true;
 }
 
-bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
-  uint64_t value)
+bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t value)
 {
   uint32_t instructions[2];
   int num_i;
 
-  if (reg_id >= AARCH64_CORE_REG_X0 && reg_id <= AARCH64_CORE_REG_X30) {
+  if (reg_id <= AARCH64_CORE_REG_X30) {
     /* msr dbgdtr_el0, xN, where N==reg*/
     instructions[0] = AARCH64_INSTR_MRS_DBGDTR_EL0(reg_id);
+    a->ctx.dirty_mask |= 1 << reg_id;
     num_i = 1;
   }
   else if (reg_id == AARCH64_CORE_REG_PC) {
@@ -246,21 +308,8 @@ bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
     /* msr dlr_el0, x0 */
     instructions[1] = AARCH64_I_MSR(DLR_EL0, X0);
     num_i = 2;
+    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   }
-#if 0
-  else if (reg == AARCH64_CORE_REG_SP) {
-    /* mov x0, sp */
-    instructions[0] = 0x910003e0;
-    /* msr dbgdtr_el0, x0 */
-    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
-  }
-  else if (reg == AARCH64_CORE_REG_SCTLR_EL1) {
-    /* mrs x0, sctlr_el1 */
-    instructions[0] = 0xd5381000;
-    /* msr dbgdtr_el0, x0 */
-    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
-  }
-#endif
   else
     return false;
 
@@ -270,6 +319,7 @@ bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
   adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
     (value >> 32) & 0xffffffff);
 
+  a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   for (int i = 0; i < num_i; ++i) {
     adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
       instructions[i]);
@@ -280,7 +330,6 @@ bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr, int reg_id,
       &a->regs.edscr);
     if (aarch64_edscr_is_error(a->regs.edscr))
       return false;
-    // if (aarch64_edscr_is_tx_full(a->regs.edscr))
     break;
   }
 
@@ -312,7 +361,7 @@ bool aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
     return false;
   c->sctlr_el1 = reg;
   c->mmu_on = reg & 1;
-
+  c->dirty_mask = 0;
   return true;
 }
 
@@ -446,6 +495,11 @@ bool aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
       value);
   return true;
+}
+
+bool aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr)
+{
+  return aarch64_set_normal_mode(a, baseaddr);
 }
 
 bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,

@@ -24,6 +24,7 @@
 #define VALUE64_ARG(__v64) \
     (int)(((__v64) >> 32) & 0xffffffff), (int)((__v64) & 0xffffffff)
 
+
 struct target t;
 
 typedef enum {
@@ -302,7 +303,6 @@ static inline bool cmdbuf_parse_mr(struct cmd *c, const char *p)
 {
   uint64_t addr;
   uint32_t size;
-  char *next;
   c->cmd = CMD_TARGET_MEM_READ;
   addr = strtol(p, (char **)&p, 0);
   size = strtol(p, NULL, 0);
@@ -696,6 +696,12 @@ static void app_process_mem_read(struct target *t, struct cmd *c)
     }
     msg("0x%08x\r\n", value);
   }
+
+  if (!target_mem_read_fast_stop(t)) {
+    msg("error\r\n");
+    return;
+  }
+
   msg("done\r\n");
 }
 
