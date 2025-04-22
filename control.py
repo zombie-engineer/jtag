@@ -3,6 +3,8 @@ import time
 import sys
 import struct
 import time
+import logging
+import argparse
 
 RESP_TYPE_NONE         = 0
 RESP_TYPE_136_BITS     = 1
@@ -283,12 +285,12 @@ class Target:
     self.__status = TargetStatus()
     self.__s = s
     self.debug_tty_read = False
-    self.__debug_tty_write = False
+    self.debug_tty_write = False
 
   def write(self, data):
     data = (data + '\r\n').encode('utf-8')
-    if self.__debug_tty_write:
-      print(f'tty_write:{data}')
+    if self.debug_tty_write:
+      logging.debug(f'tty_write:{data}')
     self.__s.write(data)
 
   def wait_cursor(self):
@@ -309,7 +311,7 @@ class Target:
     if not last_lines[-1]:
       last_lines = last_lines[:-1]
     if self.debug_tty_read:
-      print(last_lines)
+      logging.debug(f'wait_cursor: last_lines: {last_lines}')
     return last_lines
 
   def to_cursor(self):
@@ -343,7 +345,7 @@ class Target:
     regs = lines[lines.index('dumpregs') + 1:lines.index('done')]
     for regentry in regs:
       core, name, value = regentry.split(',')
-      print(f'core {core}, {name}: {value}')
+      logging.info(f'core {core}, {name}: {value}')
 
   def write_reg(self, regname, value):
     self.write(f'rw {regname} {value}')
@@ -383,7 +385,7 @@ class Target:
   def mem_read(self, address, size):
     self.write(f'mr 0x{address:08x} {size}')
     lines = self.wait_cursor()
-    print(lines)
+    logging.debug(lines)
 
 
 SDHC_BASE = 0x3f300000
@@ -405,6 +407,12 @@ SDHC_INT_EN    = SDHC_BASE + 0x38
 SDHC_CONTROL2  = SDHC_BASE + 0x3c
 SDHC_CAPS_0    = SDHC_BASE + 0x40
 SDHC_CAPS_1    = SDHC_BASE + 0x44
+
+SDHC_STATUS_CMD_INHIBIT  = 1<<0
+SDHC_STATUS_DAT_INHIBIT  = 1<<1
+SDHC_STATUS_DAT_ACTIVE   = 1<<2
+SDHC_STATUS_WRITE_ACTIVE = 1<<8
+SDHC_STATUS_READ_ACTIVE  = 1<<9
 
 SDHC_CONTROL1_INT_CLK_ENA       = 0
 SDHC_CONTROL1_INT_CLK_STABLE    = 1
@@ -509,7 +517,6 @@ class SDHC:
     return self.__t.mem_read32(SDHC_CAPS_1)
 
   def set_clock(self, setup):
-
  #     div = 4 if setup else 64
  #     v = self.control1_read()
  #     v &= ~(0xf << 16)
@@ -520,13 +527,13 @@ class SDHC:
     INTERNAL_CLK_ENABLE = 1
     SD_CLK_ENABLE       = 1 << 2
     if setup:
-      div10 = 256
+      div10 = 64
     else:
-      div10 = 4
+      div10 = 5
 
     div_hi = (div10 >> 8) & 3
     div_lo = div10 & 0xff
-    timeout = 0x0b << 16
+    timeout = 0x0f << 16
 
     self.control1_write(
       (div_lo << 8) | (div_hi << 6)
@@ -558,7 +565,7 @@ class SDHC:
       v = self.control1_read()
       if ((v & (1<<25)) == 0):
         break
-    print('reset cmd done')
+    logging.info('reset cmd done')
 
   def sw_reset_all(self):
     v = self.control1_read()
@@ -568,7 +575,7 @@ class SDHC:
       v = self.control1_read()
       if ((v & (1<<24)) == 0):
         break
-    print('emmc sw reset all done')
+    logging.info('emmc sw reset all done')
 
   def internal_clock_stop(self):
     v = self.control1_read()
@@ -590,17 +597,30 @@ class SDHC:
 
   def set_bus_width4(self):
     v = self.control0_read()
-    CONTROL0_DWIDTH4_BIT    = 1<<1
+    CONTROL0_DWIDTH4_BIT = 1 << 1
     v |= CONTROL0_DWIDTH4_BIT
     self.control0_write(v)
-    print('data bus width set to 4')
+    logging.info('data bus width set to 4')
 
   def set_high_speed(self):
+    intr = self.interrupt_read()
+    logging.info(f'Setting high speed bit. Interrupt: {intr:08x}')
+
+    if intr:
+      self.interrupt_write(intr)
+
+    # self.sd_clock_stop()
     v = self.control0_read()
-    CONTROL0_HIGH_SPEED_BIT = 1<<2
+    CONTROL0_HIGH_SPEED_BIT = 1 << 2
     v |= CONTROL0_HIGH_SPEED_BIT
     self.control0_write(v)
-    print('High speed bit is set')
+    self.set_clock(setup=False)
+    # self.sd_clock_start()
+    intr = self.interrupt_read()
+    if intr:
+      self.interrupt_write(intr)
+    logging.info(f'High speed bit is set. Interrupt: {intr:08x}')
+    time.sleep(1)
 
   def reset(self):
     # Software reset.
@@ -617,25 +637,45 @@ class SDHC:
     self.int_mask_write(0xffffffff)
     self.int_en_write(0xffffffff)
 
+  def interrupt_dump_err_values(self, intr):
+    warnstring = f'intr {intr:08x}'
+    errbits = [
+      'CMD_TIMEOUT', 'CMD_CRC', 'CMD_END_BIT', 'CMD_IDX',
+      'DAT_TIMEOUT', 'DAT_CRC', 'DAT_END_BIT', 'CURR_LIM',
+      'AUTO_CMD', 'ADMA', 'TUNING', 'RESP',
+      'INTR12', 'INTR13', 'INTR14', 'INTR15'
+    ]
+    for i in range(16):
+      if intr & (1<<(i+16)):
+        warnstring += f',{errbits[i]}'
+    logging.warning(warnstring)
+
   def cmd_wait_intr_done(self):
     INTR_CMD_DONE  = 1 << 0
     INTR_DATA_DONE = 1 << 1
     INTR_ERR       = 1 << 15
 
     while True:
+      status = self.status_read()
+      logging.debug(f'status(after): {status:08x}')
       intr = self.interrupt_read()
       if intr & INTR_CMD_DONE:
         break
       if intr & INTR_ERR:
-        break
+        self.interrupt_dump_err_values(intr)
+        raise Exception(f'interrupt {intr:08x}')
     self.interrupt_write(intr)
+    intr2 = self.interrupt_read()
+    if intr2 & intr:
+      logging.warning(f"leftover interrupt: {intr2:08x}")
 
 
   def cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp=False, data_size=0):
     cmd_type = 'ACMD' if is_acmd else 'CMD'
-    print(f'Running {cmd_type}{cmd_idx}')
+    logging.debug(f'Running {cmd_type}{cmd_idx}')
     while True:
       status = self.status_read()
+      logging.debug(f'status:{status:08x}')
       if (status & 1) == 0:
         break
 
@@ -645,11 +685,11 @@ class SDHC:
 
     intr = self.interrupt_read()
     if intr:
-      print(f'clearing stale interrupt {intr:08x}')
+      logging.warning(f'clearing stale interrupt {intr:08x}')
       self.interrupt_write(intr)
 
     self.cmdtm_write(gen_cmdtm(is_acmd, cmd_idx))
-    status = self.status_read()
+
     self.cmd_wait_intr_done()
     data = None
     resp0 = None
@@ -667,15 +707,19 @@ class SDHC:
     num_words32 = int(data_size / 4)
 
     old_debug_value = self.__t.debug_tty_read
+    old_debug_value2 = self.__t.debug_tty_write
     self.__t.debug_tty_read = False
+    self.__t.debug_tty_write = False
     for i in range(num_words32):
       done = float(i) / num_words32
       full = int(10 * done)
       cursor = '=' * full + '>'
 
+      iters = 0
       while True:
         status = self.status_read()
-        print(f'\r{cursor}{i}/{num_words32} {status}', end='')
+        print(f'\r{cursor}{i}/{num_words32} {status:08x} ({iters})', end='')
+        iters += 1
         if status & (1<<9):
           break
       d = self.data_read()
@@ -684,8 +728,9 @@ class SDHC:
     if num_words32:
       print()
     self.__t.debug_tty_read = old_debug_value
+    self.__t.debug_tty_write = old_debug_value2
 
-    print('Finished CMD{}, resp {:08x} {:08x} {:08x} {:08x}, data:{}'.format(
+    logging.debug('Finished CMD{}, resp {:08x} {:08x} {:08x} {:08x}, data:{}'.format(
       cmd_idx,
       resp0 or 0,
       resp1 or 0,
@@ -712,19 +757,20 @@ def assert_state(is_acmd, cmd_idx, state):
 
 
 def parse_r6(r: cmd_result):
+  print(f'{r.resp0:08x}')
   rca   = (r.resp0 >> 16) & 0xffff
   old_state = (r.resp0 >> 9) & 0xf
 
   for i in range(0, 9):
     if r.resp0 & (1<<i):
-      print(f'bit {i}')
+      logging.debug(f'bit {i}')
   if (r.resp0 >> 13) & 1:
-    print('bit 19')
+    logging.debug('bit 19')
   if (r.resp0 >> 14) & 1:
-    print('bit 22')
+    logging.debug('bit 22')
   if (r.resp0 >> 15) & 1:
-    print('bit 23')
-  print(f'prev_state={card_states[old_state]}, rca={rca}')
+    logging.debug('bit 23')
+  logging.info(f'prev_state={card_states[old_state]}, rca={rca}')
   return rca, old_state
 
 
@@ -748,11 +794,11 @@ class SD:
 
     new_state = target_states(is_acmd, cmd_idx)
     if new_state is not None and new_state != self.__state:
-      print('State change \'{}\'->\'{}\''.format(card_states[self.__state],
+      logging.debug('State change \'{}\'->\'{}\''.format(card_states[self.__state],
         card_states[new_state]))
       self.__state = new_state
     else:
-      print('State is same \'{}\''.format(card_states[self.__state]))
+      logging.debug('State is same \'{}\''.format(card_states[self.__state]))
 
     return ret
 
@@ -766,8 +812,7 @@ class SD:
     # ALL_SEND_CID
     ret = self.do_cmd(False, 2, 0, 0, read_resp=True, data_size=0)
     self.__state = CARD_STATE_IDENTIFICATION
-    print(f'CID: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
-    print(f'CID: {ret.resp3:08x}{ret.resp2:08x}{ret.resp1:08x}{ret.resp0:08x}')
+    logging.debug(f'CID: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
     cid_raw = (ret.resp3 << 96)|(ret.resp2 << 64)|(ret.resp1 << 32)|ret.resp0
     # Last byte of CID is not reported, so result in RESP0..3 registers is
     # shifted by 1 bite. We return CID as if CRC byte is removed to be able
@@ -812,7 +857,7 @@ class SD:
     arg = (1 << 8) | check_pattern
     ret = self.do_cmd(False, 8, 0, arg, read_resp=True, data_size=0)
     if ret.resp0 & 0xff != check_pattern:
-      print('CMD8 failed, pattern mismatch')
+      logging.warning('CMD8 failed, pattern mismatch')
       return False
     return True
 
@@ -820,17 +865,16 @@ class SD:
     # SEND_CSD
     arg = (rca << 16) & 0xffffffff
     ret = self.do_cmd(False, 9, 0, arg, read_resp=True, data_size=0)
-    print(f'CID: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
-    print(f'CID: {ret.resp3:08x}{ret.resp2:08x}{ret.resp1:08x}{ret.resp0:08x}')
+    logging.debug(f'CSD: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
     csd_raw = (ret.resp3 << 96)|(ret.resp2 << 64)|(ret.resp1 << 32)|ret.resp0
     return csd_raw << 8
 
   def cmd13(self, rca):
     # SEND_STATUS
-    arg = (0<<15) | (rca << 16)
+    arg = (0<<15) | ((rca << 16) & 0xffff0000)
     ret = self.do_cmd(False, 13, 0, arg, read_resp=True, data_size=0)
     state = (ret.resp0 >> 9) & 0xf
-    print(f'state={card_states[state]}')
+    logging.debug(f'state={card_states[state]}')
     return state
 
   def cmd55(self, rca):
@@ -872,16 +916,13 @@ class Soc:
     self.__t.reset()
 
   def resume(self):
-    self.__t.write_reg('pc', 0x80014 + 4)
-    self.__t.write_reg('x0', 0x80014)
-    print(self.__t.read_reg('x0'))
-    print(self.__t.read_reg('pc'))
+    self.__t.write_reg('pc', 0x80000 + 4)
+    logging.debug(self.__t.read_reg('pc'))
     self.__t.resume()
-    raise Exception()
 
 
 def parse_scr(v):
-  print(f'SCR: 0x{v:016x}')
+  logging.info(f'SCR: 0x{v:016x}')
   scr_struct            = (v >> 60) & 0xf
   sd_spec               = (v >> 56) & 0xf
   data_stat_after_erase = (v >> 55) & 1
@@ -913,17 +954,17 @@ def parse_scr(v):
         ver = '8.xx'
       elif sd_specx == 5:
         ver = '9.xx'
-  print(f'scr_struct: {scr_struct}')
-  print(f'sd_spec: {sd_spec}')
-  print(f'sd_spec3: {sd_spec3}')
-  print(f'sd_spec4: {sd_spec4}')
-  print(f'sd_specx: {sd_specx}')
-  print(f'sd_bus_widths: {sd_bus_widths:x}')
-  print(f'ver: {ver}')
+  logging.debug(f'scr_struct: {scr_struct}')
+  logging.debug(f'sd_spec: {sd_spec}')
+  logging.debug(f'sd_spec3: {sd_spec3}')
+  logging.debug(f'sd_spec4: {sd_spec4}')
+  logging.debug(f'sd_specx: {sd_specx}')
+  logging.debug(f'sd_bus_widths: {sd_bus_widths:x}')
+  logging.debug(f'ver: {ver}')
 
 
 def parse_cid(cid):
-  print(f'Parsing CID :{hex(cid)}')
+  logging.debug(f'Parsing CID :{hex(cid)}')
   mid = cid >> 120
   oid_raw = (cid >> 104) & 0xffff
   pname_raw = (cid >> 64) & 0xffffffffff
@@ -934,13 +975,12 @@ def parse_cid(cid):
   year = ((date_raw >> 4) & 0xff) + 2000
   oid = struct.pack('>H', oid_raw).decode('utf-8')
   pname = struct.pack('>q', pname_raw)[3:].decode('utf-8')
-
-  print(f'MID: {hex(mid)} OID:{oid} Product name: {pname}')
-  print(f'Rev: {rev}, SN:{sn:08x}, Manufacture date: {month:02} {year}')
+  logging.info(f'CID: MID: {hex(mid)} OID:{oid} Product name: {pname}')
+  logging.info(f'CID: rev: {rev}, SN:{sn:08x}, Manufacture date: {month:02} {year}')
 
 
 def parse_csd(v):
-  print(f'CSD {v:032x}')
+  logging.info(f'CSD {v:032x}')
   csd_ver = (v >> 126) & 3
   reserved = (v >> 120) & 0x3f
   data_read_access_time = (v >> 112) & 0xff
@@ -959,18 +999,18 @@ def parse_csd(v):
   erase_sector_size = (v >> 39) & 1
   write_speed_factor = (v >> 26) & 7
   max_wr_block_len = (v >> 22) & 0xf
-  print('CSD version: {}, data read access time {} {} CLK'.format(
+  logging.info('CSD version: {}, data read access time {} {} CLK'.format(
     csd_ver, data_read_access_time, data_read_access_time_clk))
-  print(f'Max data rate: {max_data_rate}, CCC: {card_command_classes:x}')
-  print('Max read block: {} ({} bytes), part: {}'.format(max_read_block,
+  logging.info(f'Max data rate: {max_data_rate}, CCC: {card_command_classes:x}')
+  logging.info('Max read block: {} ({} bytes), part: {}'.format(max_read_block,
     1<<max_read_block,
     'allowed' if part_read_allowed else 'disallowed'))
-  print(f'Write block misalignment: {write_block_misalignment}')
-  print(f'Read block misalignment: {read_block_misalignment}')
-  print(f'DSR implemented: {dsr}, device size: {device_size}')
-  print(f'Erase single block: {erase_single_block_en}, sect sz: {erase_sector_size}')
-  print(f'Write speed factor: {write_speed_factor}')
-  print(f'Max write data block length: {max_wr_block_len} ({1<<max_wr_block_len} bytes)')
+  logging.info(f'Write block misalignment: {write_block_misalignment}')
+  logging.info(f'Read block misalignment: {read_block_misalignment}')
+  logging.info(f'DSR implemented: {dsr}, device size: {device_size}')
+  logging.info(f'Erase single block: {erase_single_block_en}, sect sz: {erase_sector_size}')
+  logging.info(f'Write speed factor: {write_speed_factor}')
+  logging.info(f'Max write data block length: {max_wr_block_len} ({1<<max_wr_block_len} bytes)')
 
 
 def parse_cmd6_check_data(check_data):
@@ -978,26 +1018,25 @@ def parse_cmd6_check_data(check_data):
   for i, value in enumerate(check_data):
     v = (v << 8) | value
 
-  print(f'{v:x}')
   version = (v >> 368) & 0xff
 
   fn_sel = [(v >> (376 + i * 4)) & 0xf for i in range(6)]
   fn_supp = [(v >> (400 + i * 16)) & 0xffff for i in range(6)]
   max_power = (v >> 496) & 0xffff
 
-  print(f'version: {version}')
+  logging.info(f'version: {version}')
   string_sel  = [f'g{i+1}:{v:x}' for i, v in enumerate(fn_sel)]
   string_supp = [f'g{i+1}:{v:04x}' for i, v in enumerate(fn_supp)]
   
-  print(f'Selected functions: {string_sel}')
-  print(f'Supported functions: {string_supp}')
-  print(f'Max power: {max_power:04x}')
+  logging.info(f'Selected functions: {string_sel}')
+  logging.info(f'Supported functions: {string_supp}')
+  logging.info(f'Max power: {max_power:04x}')
   return fn_sel, fn_supp
 
 
 def target_attach_and_halt(ttydev, baudrate):
   s = serial.Serial(ttydev, baudrate, timeout=100)
-  print(f"Opened {ttydev} with baud rate {baudrate}")
+  logging.info(f"Opened {ttydev} with baud rate {baudrate}")
   t = Target(s)
   t.update_status()
   status = t.get_status()
@@ -1014,6 +1053,18 @@ def target_attach_and_halt(ttydev, baudrate):
   return soc
 
 
+CARD_CAPACITY_SDHC = 'SDHC'
+CARD_CAPACITY_SDSC = 'SDSC'
+CARD_CAPACITY_SDXC = 'SDXC'
+CARD_CAPACITY_SDUC = 'SDUC'
+
+capacity_sizes = {
+  CARD_CAPACITY_SDSC : (2, 2),
+  CARD_CAPACITY_SDHC : (2, 32),
+  CARD_CAPACITY_SDXC : (32, 2048),
+  CARD_CAPACITY_SDUC : (2048, 128*1024),
+}
+
 def sd_init_ident_mode(sd):
   # Physical Layer Simplified Specification Version 9.00
   # State machine to go through identification mode states to data transfer
@@ -1026,10 +1077,23 @@ def sd_init_ident_mode(sd):
   # ACMD41 does IDLE->READY state transition
   ret = sd.acmd41(rca=0, arg=0)
   arg = (ret.resp0 & 0x00ff8000) | (1<<30)
+  capacity = CARD_CAPACITY_SDSC
+  UHS_II_support = False
+  SDUC_support = False
   while True:
     ret = sd.acmd41(rca=0, arg=0x40ff8000)
     if ret.resp0 & (1<<31):
       break
+
+  if ret.resp0 & (1<<30):
+    capacity = CARD_CAPACITY_SDHC
+  if ret.resp0 & (1<<29):
+    UHS_II_support = True
+  if ret.resp0 & (1<<29):
+    SDUC_support = True
+
+  logging.info(f'Card capacity is {capacity} {capacity_sizes[capacity]}')
+  logging.info(f'UHS-II {UHS_II_support}')
 
   # CMD2 SEND_ALL_CID to receive card's CID register contents
   # CMD2 does READY->IDENT state transition
@@ -1038,6 +1102,7 @@ def sd_init_ident_mode(sd):
   # CMD3 SEND_RELATIVE_ADDR
   # CMD3 does IDENT->STANDBY state transition
   rca = sd.cmd3()
+  logging.info(f'rca is {rca}')
   # CMD13 SEND_STATUS to ensure status is STANDBY
   state = sd.cmd13(rca)
   if state != CARD_STATE_STANDBY:
@@ -1045,6 +1110,11 @@ def sd_init_ident_mode(sd):
   return rca
 
 def sd_set_high_speed(sd, sdhc):
+  logging.info(
+    'Switching card from DEFAULT SPEED (25MHz)to HIGH SPEED (50MHz) mode')
+
+  logging.info('Checking if card supports HIGH SPEED mode')
+
   check_data = sd.cmd6(CMD6_CHECK_FUNCTION, 0xf, 0xf, 0xf, 0xf)
   fn_sel, fn_sup = parse_cmd6_check_data(check_data)
   access_mode_sup_bits = fn_sup[0]
@@ -1053,17 +1123,22 @@ def sd_set_high_speed(sd, sdhc):
   ACCESS_MODE_SUPP_SDR50  = 2
   ACCESS_MODE_SUPP_SDR104 = 3
   ACCESS_MODE_SUPP_DDR50  = 4
-  sdr25_ok = False
-  if access_mode_sup_bits & (1<<ACCESS_MODE_SUPP_SDR25):
-    sdr25_ok = True
 
-  print('sdr25: {}'.format('yes' if sdr25_ok else 'no'))
-  if sdr25_ok:
-    sd.cmd6(CMD6_SWITCH_FUNCTION, 0xf, 0xf, 0xf, ACCESS_MODE_SUPP_SDR25)
-    fn_sel, fn_sup = parse_cmd6_check_data(check_data)
+  can_highspeed = access_mode_sup_bits & (1<<ACCESS_MODE_SUPP_SDR25)
+  if not can_highspeed:
+    logging.warning('Card does not support HIGH SPEED mode')
+    return
+
+  logging.info('Card supports HIGH SPEED mode, switching')
+  sd.cmd6(CMD6_SWITCH_FUNCTION, 0xf, 0xf, 0xf, ACCESS_MODE_SUPP_SDR25)
+  fn_sel, fn_sup = parse_cmd6_check_data(check_data)
   check_data = sd.cmd6(CMD6_CHECK_FUNCTION, 0, 0, 0, 1)
   fn_sel, fn_sup = parse_cmd6_check_data(check_data)
   sdhc.set_high_speed()
+  logging.info('Check after high speed switch')
+  check_data = sd.cmd6(CMD6_CHECK_FUNCTION, 0, 0, 0, 1)
+  fn_sel, fn_sup = parse_cmd6_check_data(check_data)
+  logging.info('Card successfully switched to HIGH SPEED mode')
 
 
 def sd_init_data_transfer_mode(sd, sdhc, rca):
@@ -1091,36 +1166,49 @@ def action_sdhc(soc):
   sdhc = soc.sdhc
   sd = soc.sd
   sdhc.reset()
-  print('SDHC internal and SD clocks running')
+  logging.info('SDHC internal and SD clocks running')
   rca = sd_init_ident_mode(sd)
   sd_init_data_transfer_mode(sd, sdhc, rca)
-  # read_sector(0, '/tmp/bin')
+  read_sector(sd)
 
 
 def do_main(action):
-  soc = target_attach_and_halt('/dev/ttyACM1', 115200 * 8)
-  if action == 'rst':
-    print('resetting')
+  soc = target_attach_and_halt('/dev/ttyACM0', 115200 * 8)
+  if action == 'reset':
+    logging.info('resetting')
     soc.reset()
-  if action == 'resume':
+  elif action == 'resume':
+    logging.info('resuming')
     soc.resume()
-  if action == 'halt':
+  elif action == 'halt':
     pass
   else:
     action_sdhc(soc)
   sys.exit(0)
 
 
-def main(action):
+def main():
+  parser = argparse.ArgumentParser()
+
+  parser.add_argument('-v', '--verbose',
+    help='print verbose logs',
+    action='store_const',
+    dest='loglevel',
+    const=logging.DEBUG,
+    default=logging.INFO)
+
+  parser.add_argument("action", nargs="?", default="default",
+    help="Action to perform")
+
+  args = parser.parse_args()
+  print(args)
+  logging.basicConfig(format='%(levelname)s:%(message)s', level=args.loglevel)
   try:
-    do_main(action)
+    do_main(args.action)
   except serial.SerialException as e:
     print(f"Serial error: {e}")
   except KeyboardInterrupt:
     print("Exiting program.")
 
 if __name__ == "__main__":
-  action = ''
-  if len(sys.argv) > 1:
-    action = sys.argv[1]
-  main(action)
+  main()
