@@ -1,168 +1,14 @@
 import serial
-import time
 import sys
 import struct
 import time
 import logging
 import argparse
-
-RESP_TYPE_NONE         = 0
-RESP_TYPE_136_BITS     = 1
-RESP_TYPE_48_BITS      = 2
-RESP_TYPE_48_BITS_BUSY = 3
-
-RESP_TYPE_R1  = 1
-RESP_TYPE_R1b = 2
-RESP_TYPE_R2  = 3
-RESP_TYPE_R3  = 4
-RESP_TYPE_R6  = 5
-RESP_TYPE_R7  = 6
-RESP_TYPE_NA  = 7
-
-cmdtm_resp_types = {
-  RESP_TYPE_R1  : RESP_TYPE_48_BITS,
-  RESP_TYPE_R1b : RESP_TYPE_48_BITS_BUSY,
-  RESP_TYPE_R2  : RESP_TYPE_136_BITS,
-  RESP_TYPE_R3  : RESP_TYPE_48_BITS,
-  RESP_TYPE_R6  : RESP_TYPE_48_BITS,
-  RESP_TYPE_R7  : RESP_TYPE_48_BITS,
-  RESP_TYPE_NA  : RESP_TYPE_NONE
-}
-
-DIR_UNKNOWN   = 0
-DIR_HOST2CARD = 0
-DIR_CARD2HOST = 1
+from bcm_sdhci import SDHCI
+import sdhc
 
 CMD6_CHECK_FUNCTION  = 0
 CMD6_SWITCH_FUNCTION = 1
-
-
-# Entry format CMD_ID : (RESP_TYPE, CHECK_CRC, DIR, HAS_DATA, MULTIBLOCK)
-sd_commands = {
-   0 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-   1 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-   2 : (RESP_TYPE_R2,   0, DIR_UNKNOWN  , 0, 0),
-   3 : (RESP_TYPE_R6,   1, DIR_UNKNOWN  , 0, 0),
-   4 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-   5 : (RESP_TYPE_R1b,  0, DIR_UNKNOWN  , 0, 0),
-   6 : (RESP_TYPE_R1,   1, DIR_CARD2HOST, 1, 0),
-   7 : (RESP_TYPE_R1b,  1, DIR_UNKNOWN  , 0, 0),
-   8 : (RESP_TYPE_R7,   1, DIR_UNKNOWN  , 0, 0),
-   9 : (RESP_TYPE_R2,   0, DIR_UNKNOWN  , 0, 0),
-  10 : (RESP_TYPE_R2,   0, DIR_UNKNOWN  , 0, 0),
-  11 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  12 : (RESP_TYPE_R1b,  1, DIR_UNKNOWN  , 0, 0),
-  13 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  14 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  15 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  16 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  17 : (RESP_TYPE_R1,   1, DIR_CARD2HOST, 1, 0),
-  18 : (RESP_TYPE_R1,   1, DIR_CARD2HOST, 1, 1),
-  19 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  20 : (RESP_TYPE_R1b,  1, DIR_UNKNOWN  , 0, 0),
-  21 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  22 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  23 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  24 : (RESP_TYPE_R1,   1, DIR_HOST2CARD, 1, 0),
-  25 : (RESP_TYPE_R1,   1, DIR_HOST2CARD, 1, 1),
-  26 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  27 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  28 : (RESP_TYPE_R1b,  1, DIR_UNKNOWN  , 0, 0),
-  29 : (RESP_TYPE_R1b,  1, DIR_UNKNOWN  , 0, 0),
-  30 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  31 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  32 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  33 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  34 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  35 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  36 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  37 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  38 : (RESP_TYPE_R1b,  1, DIR_UNKNOWN  , 0, 0),
-  39 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  40 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  41 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  42 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  43 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  44 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  45 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  46 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  47 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  48 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  49 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  50 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  51 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  52 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  53 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  54 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  55 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  56 : (RESP_TYPE_R1,   1, DIR_UNKNOWN  , 0, 0),
-  57 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  58 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0),
-  59 : (RESP_TYPE_NA,   0, DIR_UNKNOWN  , 0, 0)
-}
-
-sd_acommands = {
-   0 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   1 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   2 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   3 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   4 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   5 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   6 : (RESP_TYPE_R1,    1, DIR_UNKNOWN, 0, 0),
-   7 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   8 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-   9 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  10 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  11 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  12 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  13 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  14 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  15 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  16 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  17 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  18 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  19 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  20 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  21 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  22 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  23 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  24 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  25 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  26 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  27 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  28 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  29 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  30 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  31 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  32 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  33 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  34 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  35 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  36 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  37 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  38 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  39 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  40 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  41 : (RESP_TYPE_R3,    0, DIR_UNKNOWN, 0, 0),
-  42 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  43 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  44 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  45 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  46 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  47 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  48 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  49 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  50 : (RESP_TYPE_R1,    1, DIR_UNKNOWN, 0, 0),
-  51 : (RESP_TYPE_R1,    1, DIR_CARD2HOST, 1, 0),
-  52 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  53 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  54 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  55 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  56 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  57 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  58 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0),
-  59 : (RESP_TYPE_NA,    0, DIR_UNKNOWN, 0, 0)
-}
 
 CARD_STATE_IDLE           = 0
 CARD_STATE_READY          = 1
@@ -244,32 +90,9 @@ def target_states(is_acmd, cmd_idx):
   states = acmd_target_states if is_acmd else cmd_target_states
   return states[cmd_idx]
 
-def bitplace(v, bitpos, width):
-  return (v & ((1 << width) - 1)) << bitpos
-
-def byteswap32(v):
-  b0 = v & 0xff
-  b1 = (v >> 8) & 0xff
-  b2 = (v >> 16) & 0xff
-  b3 = (v >> 24) & 0xff
-  return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-
-
-def gen_cmdtm(is_acmd, cmd_idx):
-  dbase = sd_acommands if is_acmd else sd_commands
-  resp_type, crc, direction, is_data, multiblock = dbase[cmd_idx]
-  resp_type = cmdtm_resp_types[resp_type]
-  return \
-      bitplace(direction ,  4, 1) \
-    | bitplace(multiblock,  5, 1) \
-    | bitplace(resp_type , 16, 2) \
-    | bitplace(crc       , 19, 1) \
-    | bitplace(is_data   , 21, 1) \
-    | bitplace(cmd_idx   , 24, 6) \
-
 
 def cmd_resp_type(is_acmd, cmd_idx):
-  dbase = sd_acommands if is_acmd else sd_commands
+  dbase = sdhc.sd_acommands if is_acmd else sdhc.sd_commands
   resp_type, crc, direction, is_data, multiblock = dbase[cmd_idx]
   return resp_type
 
@@ -388,356 +211,10 @@ class Target:
     logging.debug(lines)
 
 
-SDHC_BASE = 0x3f300000
-SDHC_ARG2      = SDHC_BASE + 0x00
-SDHC_BLKSZCNT  = SDHC_BASE + 0x04
-SDHC_ARG1      = SDHC_BASE + 0x08
-SDHC_CMDTM     = SDHC_BASE + 0x0c
-SDHC_RESP0     = SDHC_BASE + 0x10
-SDHC_RESP1     = SDHC_BASE + 0x14
-SDHC_RESP2     = SDHC_BASE + 0x18
-SDHC_RESP3     = SDHC_BASE + 0x1c
-SDHC_DATA      = SDHC_BASE + 0x20
-SDHC_STATUS    = SDHC_BASE + 0x24
-SDHC_CONTROL0  = SDHC_BASE + 0x28
-SDHC_CONTROL1  = SDHC_BASE + 0x2c
-SDHC_INTERRUPT = SDHC_BASE + 0x30
-SDHC_INT_MASK  = SDHC_BASE + 0x34
-SDHC_INT_EN    = SDHC_BASE + 0x38
-SDHC_CONTROL2  = SDHC_BASE + 0x3c
-SDHC_CAPS_0    = SDHC_BASE + 0x40
-SDHC_CAPS_1    = SDHC_BASE + 0x44
-
-SDHC_STATUS_CMD_INHIBIT  = 1<<0
-SDHC_STATUS_DAT_INHIBIT  = 1<<1
-SDHC_STATUS_DAT_ACTIVE   = 1<<2
-SDHC_STATUS_WRITE_ACTIVE = 1<<8
-SDHC_STATUS_READ_ACTIVE  = 1<<9
-
-SDHC_CONTROL1_INT_CLK_ENA       = 0
-SDHC_CONTROL1_INT_CLK_STABLE    = 1
-SDHC_CONTROL1_SD_CLK_ENA        = 2
-SDHC_CONTROL1_PLL_ENA           = 3
-SDHC_CONTROL1_CLK_GENERATOR_SEL = 4
-SDHC_CONTROL1_SDCLK_DIV_HI_BITS = 6
-SDHC_CONTROL1_SDCLK_DIV_LO_BITS = 8
-
-class cmd_result:
-  def __init__(self, status, data, resp0, resp1, resp2, resp3):
-    self.status = status
-    self.data = data
-    self.resp0 = resp0
-    self.resp1 = resp1
-    self.resp2 = resp2
-    self.resp3 = resp3
-
-class SDHC:
+class SDHOST:
   def __init__(self, t):
     self.__t = t
 
-  def arg2_read(self):
-    return self.__t.mem_read32(SDHC_ARG2)
-
-  def blkszcnt_read(self):
-    return self.__t.mem_read32(SDHC_BLKSZCNT)
-
-  def blkszcnt_write(self, v):
-    self.__t.mem_write32(SDHC_BLKSZCNT, v)
-
-  def arg1_read(self):
-    return self.__t.mem_read32(SDHC_ARG1)
-
-  def arg1_write(self, v):
-    return self.__t.mem_write32(SDHC_ARG1, v)
-
-  def cmdtm_read(self):
-    return self.__t.mem_read32(SDHC_CMDTM)
-
-  def cmdtm_write(self, v):
-    return self.__t.mem_write32(SDHC_CMDTM, v)
-
-  def resp0_read(self):
-    return self.__t.mem_read32(SDHC_RESP0)
-
-  def resp1_read(self):
-    return self.__t.mem_read32(SDHC_RESP1)
-
-  def resp2_read(self):
-    return self.__t.mem_read32(SDHC_RESP2)
-
-  def resp3_read(self):
-    return self.__t.mem_read32(SDHC_RESP3)
-
-  def data_read(self):
-    return self.__t.mem_read32(SDHC_DATA)
-
-  def status_read(self):
-    return self.__t.mem_read32(SDHC_STATUS)
-
-  def control0_write(self, v):
-    self.__t.mem_write32(SDHC_CONTROL0, v)
-
-  def control0_read(self):
-    return self.__t.mem_read32(SDHC_CONTROL0)
-
-  def control1_read(self):
-    return self.__t.mem_read32(SDHC_CONTROL1)
-
-  def control1_write(self, v):
-    self.__t.mem_write32(SDHC_CONTROL1, v)
-
-  def interrupt_read(self):
-    return self.__t.mem_read32(SDHC_INTERRUPT)
-
-  def interrupt_write(self, v):
-    self.__t.mem_write32(SDHC_INTERRUPT, v)
-
-  def int_mask_read(self):
-    return self.__t.mem_read32(SDHC_INT_MASK)
-
-  def int_mask_write(self, v):
-    self.__t.mem_write32(SDHC_INT_MASK, v)
-
-  def int_en_read(self):
-    return self.__t.mem_read32(SDHC_INT_EN)
-
-  def int_en_write(self, v):
-    self.__t.mem_write32(SDHC_INT_EN, v)
-
-  def control2_read(self):
-    return self.__t.mem_read32(SDHC_CONTROL2)
-
-  def control2_write(self, v):
-    self.__t.mem_write32(SDHC_CONTROL2, v)
-
-  def caps_0_read(self):
-    return self.__t.mem_read32(SDHC_CAPS_0)
-
-  def caps_1_read(self):
-    return self.__t.mem_read32(SDHC_CAPS_1)
-
-  def set_clock(self, setup):
- #     div = 4 if setup else 64
- #     v = self.control1_read()
- #     v &= ~(0xf << 16)
- #     v |= 0xb << 16
- #     v |= 1
- #     v |= div << 8
- #     self.control1_write(v)
-    INTERNAL_CLK_ENABLE = 1
-    SD_CLK_ENABLE       = 1 << 2
-    if setup:
-      div10 = 64
-    else:
-      div10 = 5
-
-    div_hi = (div10 >> 8) & 3
-    div_lo = div10 & 0xff
-    timeout = 0x0f << 16
-
-    self.control1_write(
-      (div_lo << 8) | (div_hi << 6)
-      | SD_CLK_ENABLE
-      | INTERNAL_CLK_ENABLE
-      | timeout)
-    while True:
-      v = self.control1_read()
-      if v & (1<<1):
-        break
-
-  def sd_clock_start(self):
-    v = self.control1_read()
-    v |= 1 << SDHC_CONTROL1_SD_CLK_ENA
-    self.control1_write(v)
-    v = self.control1_read()
-
-  def sd_clock_stop(self):
-    v = self.control1_read()
-    v &= ~(1 << SDHC_CONTROL1_SD_CLK_ENA)
-    self.control1_write(v)
-    v = self.control1_read()
-
-  def sw_reset_cmd(self):
-    v = self.control1_read()
-    v |= 1<<25
-    self.control1_write(v)
-    while True:
-      v = self.control1_read()
-      if ((v & (1<<25)) == 0):
-        break
-    logging.info('reset cmd done')
-
-  def sw_reset_all(self):
-    v = self.control1_read()
-    v |= 1<<24
-    self.control1_write(v)
-    while True:
-      v = self.control1_read()
-      if ((v & (1<<24)) == 0):
-        break
-    logging.info('emmc sw reset all done')
-
-  def internal_clock_stop(self):
-    v = self.control1_read()
-    v &= ~(1<<SDHC_CONTROL1_INT_CLK_ENA)
-    self.control1_write(v)
-    while True:
-      v = self.control1_read()
-      if (v & (1<<SDHC_CONTROL1_INT_CLK_STABLE)) == 0:
-        break
-
-  def internal_clock_start(self):
-    v = self.control1_read()
-    v |= 1 << SDHC_CONTROL1_INT_CLK_ENA
-    self.control1_write(v)
-    while True:
-      v = self.control1_read()
-      if (v & (1<<SDHC_CONTROL1_INT_CLK_STABLE)):
-        break
-
-  def set_bus_width4(self):
-    v = self.control0_read()
-    CONTROL0_DWIDTH4_BIT = 1 << 1
-    v |= CONTROL0_DWIDTH4_BIT
-    self.control0_write(v)
-    logging.info('data bus width set to 4')
-
-  def set_high_speed(self):
-    intr = self.interrupt_read()
-    logging.info(f'Setting high speed bit. Interrupt: {intr:08x}')
-
-    if intr:
-      self.interrupt_write(intr)
-
-    # self.sd_clock_stop()
-    v = self.control0_read()
-    CONTROL0_HIGH_SPEED_BIT = 1 << 2
-    v |= CONTROL0_HIGH_SPEED_BIT
-    self.control0_write(v)
-    self.set_clock(setup=False)
-    # self.sd_clock_start()
-    intr = self.interrupt_read()
-    if intr:
-      self.interrupt_write(intr)
-    logging.info(f'High speed bit is set. Interrupt: {intr:08x}')
-    time.sleep(1)
-
-  def reset(self):
-    # Software reset.
-    self.sw_reset_all()
-    # Restart internal SDHC clock
-    self.internal_clock_stop()
-    self.internal_clock_start()
-    # Set CONTROL0 to default
-    self.control0_write(0)
-    # Set CONTROL1 to default
-    self.control2_write(0)
-    self.set_clock(setup=True)
-    self.sd_clock_start()
-    self.int_mask_write(0xffffffff)
-    self.int_en_write(0xffffffff)
-
-  def interrupt_dump_err_values(self, intr):
-    warnstring = f'intr {intr:08x}'
-    errbits = [
-      'CMD_TIMEOUT', 'CMD_CRC', 'CMD_END_BIT', 'CMD_IDX',
-      'DAT_TIMEOUT', 'DAT_CRC', 'DAT_END_BIT', 'CURR_LIM',
-      'AUTO_CMD', 'ADMA', 'TUNING', 'RESP',
-      'INTR12', 'INTR13', 'INTR14', 'INTR15'
-    ]
-    for i in range(16):
-      if intr & (1<<(i+16)):
-        warnstring += f',{errbits[i]}'
-    logging.warning(warnstring)
-
-  def cmd_wait_intr_done(self):
-    INTR_CMD_DONE  = 1 << 0
-    INTR_DATA_DONE = 1 << 1
-    INTR_ERR       = 1 << 15
-
-    while True:
-      status = self.status_read()
-      logging.debug(f'status(after): {status:08x}')
-      intr = self.interrupt_read()
-      if intr & INTR_CMD_DONE:
-        break
-      if intr & INTR_ERR:
-        self.interrupt_dump_err_values(intr)
-        raise Exception(f'interrupt {intr:08x}')
-    self.interrupt_write(intr)
-    intr2 = self.interrupt_read()
-    if intr2 & intr:
-      logging.warning(f"leftover interrupt: {intr2:08x}")
-
-
-  def cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp=False, data_size=0):
-    cmd_type = 'ACMD' if is_acmd else 'CMD'
-    logging.debug(f'Running {cmd_type}{cmd_idx}')
-    while True:
-      status = self.status_read()
-      logging.debug(f'status:{status:08x}')
-      if (status & 1) == 0:
-        break
-
-    self.blkszcnt_write(blksize)
-
-    self.arg1_write(arg1)
-
-    intr = self.interrupt_read()
-    if intr:
-      logging.warning(f'clearing stale interrupt {intr:08x}')
-      self.interrupt_write(intr)
-
-    self.cmdtm_write(gen_cmdtm(is_acmd, cmd_idx))
-
-    self.cmd_wait_intr_done()
-    data = None
-    resp0 = None
-    resp1 = None
-    resp2 = None
-    resp3 = None
-
-    if read_resp:
-      resp0 = self.resp0_read()
-      resp1 = self.resp1_read()
-      resp2 = self.resp2_read()
-      resp3 = self.resp3_read()
-
-    data = b''
-    num_words32 = int(data_size / 4)
-
-    old_debug_value = self.__t.debug_tty_read
-    old_debug_value2 = self.__t.debug_tty_write
-    self.__t.debug_tty_read = False
-    self.__t.debug_tty_write = False
-    for i in range(num_words32):
-      done = float(i) / num_words32
-      full = int(10 * done)
-      cursor = '=' * full + '>'
-
-      iters = 0
-      while True:
-        status = self.status_read()
-        print(f'\r{cursor}{i}/{num_words32} {status:08x} ({iters})', end='')
-        iters += 1
-        if status & (1<<9):
-          break
-      d = self.data_read()
-      print(f'\r{cursor}{i}/{num_words32} {status:08x} {d:08x}', end='')
-      data += struct.pack('I', d)
-    if num_words32:
-      print()
-    self.__t.debug_tty_read = old_debug_value
-    self.__t.debug_tty_write = old_debug_value2
-
-    logging.debug('Finished CMD{}, resp {:08x} {:08x} {:08x} {:08x}, data:{}'.format(
-      cmd_idx,
-      resp0 or 0,
-      resp1 or 0,
-      resp2 or 0,
-      resp3 or 0,
-      data))
-    return cmd_result(status, data, resp0, resp1, resp2, resp3)
 
 
 def assert_state(is_acmd, cmd_idx, state):
@@ -756,7 +233,7 @@ def assert_state(is_acmd, cmd_idx, state):
     raise Exception(msg)
 
 
-def parse_r6(r: cmd_result):
+def parse_r6(r: sdhc.cmd_result):
   print(f'{r.resp0:08x}')
   rca   = (r.resp0 >> 16) & 0xffff
   old_state = (r.resp0 >> 9) & 0xf
@@ -775,8 +252,9 @@ def parse_r6(r: cmd_result):
 
 
 class SD:
-  def __init__(self, sdhc: SDHC):
+  def __init__(self, sdhc: SDHCI, sdhost: SDHOST):
     self.__sdhc = sdhc
+    self.__sdhost = sdhost
     self.__state = CARD_STATE_UNKNOWN
 
 
@@ -785,8 +263,7 @@ class SD:
     assert_state(is_acmd, cmd_idx, self.__state)
     ret = self.__sdhc.cmd(is_acmd, cmd_idx, blksize, arg1, read_resp,
       data_size)
-
-    if resp_type == RESP_TYPE_R6:
+    if resp_type == sdhc.RESP_TYPE_R6:
       rca, old_state = parse_r6(ret)
       if old_state != self.__state:
         raise Exception('Prev state incorrect. assumed:{}, was:{}'.format(
@@ -907,10 +384,11 @@ class SD:
 
 
 class Soc:
-  def __init__(self, t: Target):
+  def __init__(self, t: Target, logger):
     self.__t = t
-    self.sdhc = SDHC(self.__t)
-    self.sd = SD(self.sdhc)
+    self.sdhc = SDHCI(self.__t, logger)
+    self.sdhost = SDHOST(self.__t)
+    self.sd = SD(self.sdhc, self.sdhost)
 
   def reset(self):
     self.__t.reset()
@@ -1049,7 +527,7 @@ def target_attach_and_halt(ttydev, baudrate):
   t.dump_regs()
   t.mem_read(0x80000, 24)
 
-  soc = Soc(t)
+  soc = Soc(t, logging)
   return soc
 
 
