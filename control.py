@@ -5,6 +5,9 @@ import time
 import logging
 import argparse
 from bcm_sdhci import SDHCI
+from bcm_sdhost import SDHOST
+import bcm_gpio
+import bcm_clock_manager
 import sdhc
 
 CMD6_CHECK_FUNCTION  = 0
@@ -86,6 +89,11 @@ acmd_target_states = {
   51 : None,
 }
 
+#def measure_vpu_clock(t):
+#  div = 1000
+#  crystal = 19200000
+
+
 def target_states(is_acmd, cmd_idx):
   states = acmd_target_states if is_acmd else cmd_target_states
   return states[cmd_idx]
@@ -107,8 +115,8 @@ class Target:
   def __init__(self, s):
     self.__status = TargetStatus()
     self.__s = s
-    self.debug_tty_read = False
-    self.debug_tty_write = False
+    self.debug_tty_read = True
+    self.debug_tty_write = True
 
   def write(self, data):
     data = (data + '\r\n').encode('utf-8')
@@ -211,12 +219,6 @@ class Target:
     logging.debug(lines)
 
 
-class SDHOST:
-  def __init__(self, t):
-    self.__t = t
-
-
-
 def assert_state(is_acmd, cmd_idx, state):
   if not is_acmd and cmd_idx == 0:
     return
@@ -252,16 +254,33 @@ def parse_r6(r: sdhc.cmd_result):
 
 
 class SD:
-  def __init__(self, sdhc: SDHCI, sdhost: SDHOST):
+  def __init__(self, sdhc: SDHCI, sdhost: SDHOST, use_sdhost):
     self.__sdhc = sdhc
     self.__sdhost = sdhost
     self.__state = CARD_STATE_UNKNOWN
+    if use_sdhost:
+      self.__sdctrl = self.__sdhost
+      self.__sdhc.stop()
+      self.__sdhost.init_gpio()
+    else:
+      self.__sdctrl = self.__sdhc
+      self.__sdhost.stop()
+
+  def __set_state(self, state):
+    old_state = card_states[self.__state]
+    new_state = card_states[state]
+    print(f"SD::state: {old_state} -> {new_state}")
+    self.__state = state
+
+
+  def reset(self):
+    self.__sdctrl.reset()
 
 
   def do_cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp, data_size):
     resp_type = cmd_resp_type(is_acmd, cmd_idx)
     assert_state(is_acmd, cmd_idx, self.__state)
-    ret = self.__sdhc.cmd(is_acmd, cmd_idx, blksize, arg1, read_resp,
+    ret = self.__sdctrl.cmd(is_acmd, cmd_idx, blksize, arg1, read_resp,
       data_size)
     if resp_type == sdhc.RESP_TYPE_R6:
       rca, old_state = parse_r6(ret)
@@ -273,7 +292,7 @@ class SD:
     if new_state is not None and new_state != self.__state:
       logging.debug('State change \'{}\'->\'{}\''.format(card_states[self.__state],
         card_states[new_state]))
-      self.__state = new_state
+      self.__set_state(new_state)
     else:
       logging.debug('State is same \'{}\''.format(card_states[self.__state]))
 
@@ -282,13 +301,13 @@ class SD:
   def cmd0(self):
     # GO_IDLE_STATE 
     ret = self.do_cmd(False, 0, 0, 0, read_resp=False, data_size=0)
-    self.__state = CARD_STATE_IDLE
+    self.__set_state(CARD_STATE_IDLE)
     return ret
 
   def cmd2(self):
     # ALL_SEND_CID
     ret = self.do_cmd(False, 2, 0, 0, read_resp=True, data_size=0)
-    self.__state = CARD_STATE_IDENTIFICATION
+    self.__set_state(CARD_STATE_IDENTIFICATION)
     logging.debug(f'CID: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
     cid_raw = (ret.resp3 << 96)|(ret.resp2 << 64)|(ret.resp1 << 32)|ret.resp0
     # Last byte of CID is not reported, so result in RESP0..3 registers is
@@ -312,8 +331,8 @@ class SD:
     arg |= 0xff << 16
     arg |= (mode & 1) << 31
 
-    blksizecount = (1<<16) | 64
-    ret = self.do_cmd(False, 6, blksizecount, arg, read_resp=True, data_size=64)
+    blksize = 1
+    ret = self.do_cmd(False, 6, blksize, arg, read_resp=True, data_size=64)
     data = [i for i in ret.data]
     return data
 
@@ -321,7 +340,7 @@ class SD:
     # SELECT_CARD
     arg = (rca << 16) & 0xffffffff
     ret = self.do_cmd(False, 7, 0, arg, read_resp=True, data_size=0)
-    self.__state = CARD_STATE_TRAN
+    self.__set_state(CARD_STATE_TRAN)
     return ret
 
   def cmd8(self):
@@ -378,17 +397,32 @@ class SD:
     # SEND_SCR
     self.cmd55(rca)
     arg = 0
-    blksize = (1<<16) | 8
+    # For SDHCI blksize = (1<<16) | 8
+    blksize = 1
     ret = self.do_cmd(True, 51, blksize, arg, read_resp=True, data_size=8)
     return struct.unpack('>Q', ret.data)[0]
+
+  def set_bus_width4(self):
+    self.__sdctrl.set_bus_width4()
+
+  def set_high_speed(self):
+    self.__sdctrl.set_high_speed()
 
 
 class Soc:
   def __init__(self, t: Target, logger):
     self.__t = t
-    self.sdhc = SDHCI(self.__t, logger)
-    self.sdhost = SDHOST(self.__t)
-    self.sd = SD(self.sdhc, self.sdhost)
+    self.clockman = bcm_clock_manager.BCMClockManager(t, logger)
+    self.gpio = bcm_gpio.BCM_GPIO(t)
+    self.sd = SD(
+      SDHCI(self.__t, logger),
+      SDHOST(self.gpio, self.__t, logger), use_sdhost=True)
+
+  def read_mem32(self, address):
+    return self.__t.mem_read32(address)
+
+  def write_mem32(self, address, v):
+    self.__t.mem_write32(address, v)
 
   def reset(self):
     self.__t.reset()
@@ -555,11 +589,13 @@ def sd_init_ident_mode(sd):
   # ACMD41 does IDLE->READY state transition
   ret = sd.acmd41(rca=0, arg=0)
   arg = (ret.resp0 & 0x00ff8000) | (1<<30)
+  print(f'ACMD41: resp: {ret.resp0:08x}')
   capacity = CARD_CAPACITY_SDSC
   UHS_II_support = False
   SDUC_support = False
   while True:
     ret = sd.acmd41(rca=0, arg=0x40ff8000)
+    print(f'ACMD41 repeat: arg=0x40ff8000, resp: {ret.resp0:08x}')
     if ret.resp0 & (1<<31):
       break
 
@@ -587,7 +623,7 @@ def sd_init_ident_mode(sd):
     raise Exception('Failed to put card in \'standby\' state')
   return rca
 
-def sd_set_high_speed(sd, sdhc):
+def sd_set_high_speed(sd):
   logging.info(
     'Switching card from DEFAULT SPEED (25MHz)to HIGH SPEED (50MHz) mode')
 
@@ -612,14 +648,14 @@ def sd_set_high_speed(sd, sdhc):
   fn_sel, fn_sup = parse_cmd6_check_data(check_data)
   check_data = sd.cmd6(CMD6_CHECK_FUNCTION, 0, 0, 0, 1)
   fn_sel, fn_sup = parse_cmd6_check_data(check_data)
-  sdhc.set_high_speed()
+  sd.set_high_speed()
   logging.info('Check after high speed switch')
   check_data = sd.cmd6(CMD6_CHECK_FUNCTION, 0, 0, 0, 1)
   fn_sel, fn_sup = parse_cmd6_check_data(check_data)
   logging.info('Card successfully switched to HIGH SPEED mode')
 
 
-def sd_init_data_transfer_mode(sd, sdhc, rca):
+def sd_init_data_transfer_mode(sd, rca):
   # Guide card through data transfer mode states into 'tran' state
   # CMD9 SEND_CSD to get and parse CSD registers
   csd = sd.cmd9(rca)
@@ -630,8 +666,9 @@ def sd_init_data_transfer_mode(sd, sdhc, rca):
   scr = sd.acmd51(rca)
   parse_scr(scr)
   sd.acmd6(rca, bus_width_4=True)
-  sdhc.set_bus_width4()
-  sd_set_high_speed(sd, sdhc)
+  time.sleep(100 * 0.001 * 0.001)
+  sd.set_bus_width4()
+  sd_set_high_speed(sd)
 
 
 def read_sector(sd):
@@ -641,12 +678,12 @@ def read_sector(sd):
 
 
 def action_sdhc(soc):
-  sdhc = soc.sdhc
   sd = soc.sd
-  sdhc.reset()
+  sd.reset()
+
   logging.info('SDHC internal and SD clocks running')
   rca = sd_init_ident_mode(sd)
-  sd_init_data_transfer_mode(sd, sdhc, rca)
+  sd_init_data_transfer_mode(sd, rca)
   read_sector(sd)
 
 
@@ -660,6 +697,10 @@ def do_main(action):
     soc.resume()
   elif action == 'halt':
     pass
+  elif action.startswith('r32'):
+    addr = int(action[3:], 0)
+    v = soc.read_mem32(addr)
+    print(f'read_mem32 result: 0x{addr:08x}: 0x{v:08x}')
   else:
     action_sdhc(soc)
   sys.exit(0)

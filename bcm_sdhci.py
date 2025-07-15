@@ -272,6 +272,10 @@ class SDHCI:
     self.__log.info(f'High speed bit is set. Interrupt: {intr:08x}')
     time.sleep(1)
 
+  def stop(self):
+    self.internal_clock_stop()
+    self.internal_clock_stop()
+
   def reset(self):
     # Software reset.
     self.sw_reset_all()
