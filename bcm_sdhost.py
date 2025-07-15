@@ -35,6 +35,20 @@ SDHOST_CMD_RESPONSE_136 = (1<<9)
 SDHOST_CMD_READ         = (1<<6)
 SDHOST_CMD_COMMAND_MASK = 0x003f
 
+SDHSTS_BUSY_IRPT    = 0x400
+SDHSTS_BLOCK_IRPT   = 0x200
+SDHSTS_SDIO_IRPT    = 0x100
+SDHSTS_REW_TIME_OUT = 0x80
+SDHSTS_CMD_TIME_OUT = 0x40
+SDHSTS_CRC16_ERROR  = 0x20
+SDHSTS_CRC7_ERROR   = 0x10
+SDHSTS_FIFO_ERROR   = 0x08
+SDHSTS_DATA_FLAG    = 0x01
+
+SDHSTS_TRANSFER_ERROR_MASK = SDHSTS_CRC7_ERROR | SDHSTS_CRC16_ERROR | SDHSTS_REW_TIME_OUT | SDHSTS_FIFO_ERROR
+SDHSTS_ERROR_MASK = SDHSTS_CMD_TIME_OUT | SDHSTS_TRANSFER_ERROR_MASK
+
+
 SDHOST_HSTS_DATA = 1
 
 class SDHOST_REGS:
@@ -189,7 +203,6 @@ class SDHOST:
     if resp_type == sdhc.RESP_TYPE_R2:
       result |= SDHOST_CMD_RESPONSE_136
     if direction == sdhc.DIR_CARD2HOST:
-      print('CARD -> HOST')
       result |= SDHOST_CMD_READ
     return result
 
@@ -197,11 +210,16 @@ class SDHOST:
     while True:
       status = self.__r.hsts_read()
       if status & SDHOST_HSTS_DATA:
+        print('status: {status:08x}')
         return status
 
+  def cmd(self, is_acmd, cmd_idx, blksize, arg, read_resp=False, data_size=0):
+    if blksize:
+      num_blocks = int(data_size / blksize)
+    else:
+      num_blocks = data_size
+    print(f'CMD{cmd_idx}, blksize: {blksize}, data_size: {data_size}, numblocks:{num_blocks}')
 
-  def cmd(self, is_acmd, cmd_idx, blksize, arg, read_resp=False,
-    data_size=0):
     self.__t.debug_tty_read = True
     self.__t.debug_tty_write = True
     cmd_type = 'ACMD' if is_acmd else 'CMD'
@@ -209,12 +227,17 @@ class SDHOST:
 
     while True:
       cmdreg = self.__r.cmd_read()
-      self.__log.debug(f'status:{cmdreg:08x}')
+      self.__log.info(f'cmd:{cmdreg:08x}')
       if cmdreg & SDHOST_CMD_NEW_FLAG == 0:
         break
 
-    self.__r.hbct_write(data_size)
-    self.__r.hblc_write(blksize)
+    hsts = self.__r.hsts_read()
+    if hsts & SDHSTS_ERROR_MASK:
+      print('Resetting error status {hsts:08x}')
+      self.__r.hsts_write(hsts)
+
+    self.__r.hbct_write(blksize)
+    self.__r.hblc_write(num_blocks)
     self.__r.arg_write(arg)
 #
 #    intr = self.interrupt_read()
@@ -226,13 +249,13 @@ class SDHOST:
 
     while True:
       cmdreg = self.__r.cmd_read()
-      self.__log.debug(f'status:{cmdreg:08x}')
+      self.__log.debug(f'cmd:{cmdreg:08x}')
       if cmdreg & SDHOST_CMD_NEW_FLAG == 0:
         break
 
     if cmdreg & SDHOST_CMD_FAILED:
       hsts = self.__r.hsts_read()
-      raise Exception(f'CMD{cmd_idx} failed HSTS:{hsts:08x}')
+      raise Exception(f'CMD{cmd_idx} failed CMD:{cmdreg:08x}, HSTS:{hsts:08x}')
 
     data = None
     resp0 = None
@@ -262,8 +285,7 @@ class SDHOST:
       iters = 0
       status = self.__wait_data_rdy()
       d = self.__r.data_read()
-      print(hex(d))
-      # print(f'\r{cursor}{i}/{num_words32} {status:08x} {d:08x}', end='')
+      print(f'\r{cursor}{i}/{num_words32} {status:08x} {d:08x}', end='')
       data += struct.pack('I', d)
 
     if num_words32:

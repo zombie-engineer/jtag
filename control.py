@@ -236,7 +236,7 @@ def assert_state(is_acmd, cmd_idx, state):
 
 
 def parse_r6(r: sdhc.cmd_result):
-  print(f'{r.resp0:08x}')
+  print(f'R6 response is: {r.resp0:08x}')
   rca   = (r.resp0 >> 16) & 0xffff
   old_state = (r.resp0 >> 9) & 0xf
 
@@ -272,10 +272,8 @@ class SD:
     print(f"SD::state: {old_state} -> {new_state}")
     self.__state = state
 
-
   def reset(self):
     self.__sdctrl.reset()
-
 
   def do_cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp, data_size):
     resp_type = cmd_resp_type(is_acmd, cmd_idx)
@@ -331,7 +329,7 @@ class SD:
     arg |= 0xff << 16
     arg |= (mode & 1) << 31
 
-    blksize = 1
+    blksize = 64
     ret = self.do_cmd(False, 6, blksize, arg, read_resp=True, data_size=64)
     data = [i for i in ret.data]
     return data
@@ -361,9 +359,11 @@ class SD:
     # SEND_CSD
     arg = (rca << 16) & 0xffffffff
     ret = self.do_cmd(False, 9, 0, arg, read_resp=True, data_size=0)
-    logging.debug(f'CSD: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
+    logging.info(f'CSD: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
     csd_raw = (ret.resp3 << 96)|(ret.resp2 << 64)|(ret.resp1 << 32)|ret.resp0
-    return csd_raw << 8
+    if self.__sdctrl == self.__sdhc:
+      csd_raw <<= 8
+    return csd_raw
 
   def cmd13(self, rca):
     # SEND_STATUS
@@ -380,7 +380,7 @@ class SD:
   def cmd17(self, block_idx):
     # READ_SINGLE_BLOCK
     arg = block_idx
-    blksize = (1<<16) | 512
+    blksize = 512
     return self.do_cmd(False, 17, blksize, arg, read_resp=True, data_size=512)
 
   def acmd6(self, rca, bus_width_4):
@@ -398,7 +398,7 @@ class SD:
     self.cmd55(rca)
     arg = 0
     # For SDHCI blksize = (1<<16) | 8
-    blksize = 1
+    blksize = 8
     ret = self.do_cmd(True, 51, blksize, arg, read_resp=True, data_size=8)
     return struct.unpack('>Q', ret.data)[0]
 
@@ -493,7 +493,7 @@ def parse_cid(cid):
 
 def parse_csd(v):
   logging.info(f'CSD {v:032x}')
-  csd_ver = (v >> 126) & 3
+  csd_version  = (v >> 126) & 3
   reserved = (v >> 120) & 0x3f
   data_read_access_time = (v >> 112) & 0xff
   data_read_access_time_clk = (v >> 104) & 0xff
@@ -512,7 +512,7 @@ def parse_csd(v):
   write_speed_factor = (v >> 26) & 7
   max_wr_block_len = (v >> 22) & 0xf
   logging.info('CSD version: {}, data read access time {} {} CLK'.format(
-    csd_ver, data_read_access_time, data_read_access_time_clk))
+    csd_version, data_read_access_time, data_read_access_time_clk))
   logging.info(f'Max data rate: {max_data_rate}, CCC: {card_command_classes:x}')
   logging.info('Max read block: {} ({} bytes), part: {}'.format(max_read_block,
     1<<max_read_block,
