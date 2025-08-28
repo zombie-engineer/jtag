@@ -492,6 +492,8 @@ USBD_StatusTypeDef USBD_LL_Suspend(USBD_HandleTypeDef *pdev)
 {
   pdev->dev_old_state =  pdev->dev_state;
   pdev->dev_state  = USBD_STATE_SUSPENDED;
+  if (pdev->pClass->Suspend)
+    pdev->pClass->Suspend(pdev);
 
   return USBD_OK;
 }

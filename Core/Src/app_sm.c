@@ -1,3 +1,5 @@
+#include "FreeRTOS.h"
+#include "task.h"
 #include <app_sm.h>
 #include "jtag.h"
 #include <adiv5.h>
@@ -16,6 +18,14 @@
 #define RX_FIFO_SIZE 256
 #define TX_FIFO_SIZE 256
 
+#define SYMBOL_BACKSPACE '\b'
+#define SYMBOL_ESCAPE 0x1b
+#define SYMBOL_ARROW 0x5b
+#define SYMBOL_ARROW_UP    0x41 // 'A'
+#define SYMBOL_ARROW_DOWN  0x42 // 'B'
+#define SYMBOL_ARROW_RIGHT 0x43 // 'C'
+#define SYMBOL_ARROW_LEFT  0x44 // 'D'
+
 /*
  * STMCube c lib does not support uint64_t printing, so we have to split the
  * number to 2 by 32
@@ -26,6 +36,20 @@
 
 
 struct target t;
+
+struct usb_stats {
+  int processed_rx;
+  int processed_tx;
+  int popped_from_rx_fifo;
+  int pushed_to_tx_fifo;
+  int popped_from_rx_fifo_newline;
+  int deinit_counter;
+  int suspend_counter;
+  int init_counter;
+  bool is_usb_attached;
+};
+
+struct usb_stats ust = { 0 };
 
 typedef enum {
   CMD_NONE                = 0,
@@ -58,24 +82,23 @@ struct fifo {
   size_t sz;
 };
 
-/* Definitions for queue_cmd */
-static osMessageQueueId_t cmd_queue_handle;
+static osMessageQueueId_t cmd_msg_queue;
 
 static osMutexId_t msg_mutex;
 static osMutexId_t tx_mutex;
 
-/* Definitions for task_uart_rx */
-osThreadId_t task_uart_rxHandle;
+static osThreadId_t thread_id_uart_rx;
+static osThreadId_t thread_id_uart_tx;
 
-uint32_t rx_buf_stopper;
-uint32_t task_uart_rx_buf[ 128 ];
-uint32_t rx_buf_stopper1;
+static uint32_t task_uart_rx_buf[256];
+static uint32_t task_uart_tx_buf[256];
 
-typedef StaticTask_t osStaticThreadDef_t;
-void task_fn_uart_rx(void *argument);
-void task_fn_uart_tx(void *argument);
-osStaticThreadDef_t task_uart_rx_cb;
-const osThreadAttr_t task_uart_rx_attributes = {
+static void task_fn_uart_rx(void *argument);
+static void task_fn_uart_tx(void *argument);
+
+static StaticTask_t task_uart_rx_cb;
+
+static const osThreadAttr_t task_attrs_uart_rx = {
   .name = "task_uart_rx",
   .cb_mem = &task_uart_rx_cb,
   .cb_size = sizeof(task_uart_rx_cb),
@@ -83,23 +106,23 @@ const osThreadAttr_t task_uart_rx_attributes = {
   .stack_size = sizeof(task_uart_rx_buf),
   .priority = (osPriority_t) osPriorityHigh,
 };
-/* Definitions for task_uart_tx */
-osThreadId_t task_uart_txHandle;
-uint32_t task_uart_tx_buf[ 128 ];
-osStaticThreadDef_t task_uart_tx_cb;
-const osThreadAttr_t task_uart_tx_attributes = {
+
+static StaticTask_t task_uart_tx_cb;
+
+static const osThreadAttr_t task_attrs_uart_tx = {
   .name = "task_uart_tx",
   .cb_mem = &task_uart_tx_cb,
   .cb_size = sizeof(task_uart_tx_cb),
   .stack_mem = &task_uart_tx_buf[0],
   .stack_size = sizeof(task_uart_tx_buf),
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityHigh,
 };
 
 static struct cmd queue_cmd_buf[2 * sizeof(uint16_t)];
 
 static StaticQueue_t queue_cmd_cb;
-static const osMessageQueueAttr_t queue_cmd_attributes = {
+
+static const osMessageQueueAttr_t queue_cmd_attrs = {
   .name = "queue_cmd",
   .cb_mem = &queue_cmd_cb,
   .cb_size = sizeof(queue_cmd_cb),
@@ -120,15 +143,14 @@ static osSemaphoreId_t __name;
 #define SEMA_INIT(__name, __max, __init) \
   __name = osSemaphoreNew(__max, __init, &__name ## _attr)
 
-SEMA_STATIC(tx_done_sema);
-SEMA_STATIC(tx_avail_sema);
-SEMA_STATIC(tx_free_sema);
-SEMA_STATIC(rx_sema);
+SEMA_STATIC(sema_tx_fifo_non_empty);
+SEMA_STATIC(sema_tx_fifo_not_full);
+SEMA_STATIC(sema_rx_avail);
 
 static uint8_t usb_rx_buf[RX_FIFO_SIZE];
 static uint8_t usb_tx_buf[TX_FIFO_SIZE];
 
-static char msg_buf[128];
+static uint8_t msg_buf[128];
 
 static struct fifo uart_fifo_rx = {
   .buf = usb_rx_buf,
@@ -144,6 +166,31 @@ static struct fifo uart_fifo_tx = {
   .sz = sizeof(usb_tx_buf)
 };
 
+static bool rx_fifo_ready = false;
+static bool tx_fifo_ready = false;
+static bool special_symbol_active = false;
+static bool arrow_symbol_active = false;
+
+static void sema_refill(osSemaphoreId_t s, uint32_t max_count)
+{
+  while (osSemaphoreGetCount(s) < max_count)
+    osSemaphoreRelease(s);
+}
+
+static void sema_exhaust(osSemaphoreId_t s)
+{
+  while (osSemaphoreGetCount(s))
+    osSemaphoreAcquire(s, osWaitForever);
+}
+
+static void fifo_reset(struct fifo *f, uint8_t *buf, size_t buf_sz)
+{
+  memset(buf, 0, buf_sz);
+  f->buf = buf;
+  f->sz = buf_sz;
+  f->head = 0;
+  f->tail = 0;
+}
 
 static bool fifo_push(struct fifo *f, uint8_t ch)
 {
@@ -163,21 +210,27 @@ static bool fifo_push(struct fifo *f, uint8_t ch)
 
 extern void Error_Handler(void);
 
-static inline bool tx_fifo_push(uint8_t ch)
+static inline void tx_fifo_push(uint8_t ch)
 {
-  bool success;
+  if (!tx_fifo_ready)
+    return;
 
-  if (osSemaphoreAcquire(tx_free_sema, osWaitForever) != osOK)
+  if (osSemaphoreAcquire(sema_tx_fifo_not_full, osWaitForever) != osOK)
     Error_Handler();
 
   portENTER_CRITICAL();
-  success = fifo_push(&uart_fifo_tx, ch);
-  portEXIT_CRITICAL();
-  if (success) {
-    if (osSemaphoreRelease(tx_avail_sema) != osOK)
-      Error_Handler();
+  if (!tx_fifo_ready) {
+    portEXIT_CRITICAL();
+    return;
   }
-  return success;
+
+  if (!fifo_push(&uart_fifo_tx, ch))
+    Error_Handler();
+
+  ust.pushed_to_tx_fifo++;
+  osSemaphoreRelease(sema_tx_fifo_non_empty);
+  portEXIT_CRITICAL();
+  osThreadYield();
 }
 
 static int uart_tx_fifo_push(const uint8_t *msg, size_t len)
@@ -185,12 +238,9 @@ static int uart_tx_fifo_push(const uint8_t *msg, size_t len)
   size_t i;
   osMutexAcquire(tx_mutex, osWaitForever);
 
-  for (i = 0; i < len; ++i) {
-    while(1) {
-      if (tx_fifo_push(msg[i]))
-        break;
-    }
-  }
+  for (i = 0; i < len; ++i)
+    tx_fifo_push(msg[i]);
+
   osMutexRelease(tx_mutex);
   return i;
 }
@@ -250,40 +300,83 @@ void app_sm_init(void)
   appstate = SM_IDLING;
 
   /* creation of queue_cmd */
-  cmd_queue_handle = osMessageQueueNew (2, sizeof(struct cmd),
-    &queue_cmd_attributes);
+  cmd_msg_queue = osMessageQueueNew(2, sizeof(struct cmd),
+    &queue_cmd_attrs);
 
-  SEMA_INIT(rx_sema      , sizeof(usb_rx_buf), 0);
-  SEMA_INIT(tx_avail_sema, sizeof(usb_tx_buf), 0);
-  SEMA_INIT(tx_free_sema , sizeof(usb_tx_buf), sizeof(usb_tx_buf));
-  SEMA_INIT(tx_done_sema , 1, 0);
+  SEMA_INIT(sema_rx_avail, sizeof(usb_rx_buf) - 1, 0);
+
+  SEMA_INIT(sema_tx_fifo_non_empty,
+    sizeof(usb_tx_buf) - 1,
+    0);
+
+  SEMA_INIT(sema_tx_fifo_not_full,
+    sizeof(usb_tx_buf) - 1,
+    sizeof(usb_tx_buf) - 1);
+
+  fifo_reset(&uart_fifo_rx, usb_rx_buf, sizeof(usb_rx_buf));
+  fifo_reset(&uart_fifo_tx, usb_tx_buf, sizeof(usb_tx_buf));
 
   msg_mutex = osMutexNew(NULL);
   tx_mutex = osMutexNew(NULL);
 
-  /* creation of task_uart_rx */
-  task_uart_rxHandle = osThreadNew(task_fn_uart_rx, NULL, &task_uart_rx_attributes);
-
-  /* creation of task_uart_tx */
-  task_uart_txHandle = osThreadNew(task_fn_uart_tx, NULL, &task_uart_tx_attributes);
+  thread_id_uart_rx = osThreadNew(task_fn_uart_rx, NULL, &task_attrs_uart_rx);
+  thread_id_uart_tx = osThreadNew(task_fn_uart_tx, NULL, &task_attrs_uart_tx);
 
   c.cmd = CMD_NONE;
-  osMessageQueuePut(cmd_queue_handle, &c, 0, 0);
+  // osMessageQueuePut(cmd_msg_queue, &c, 0, 0);
 }
 
-void app_on_new_chars(const uint8_t *buf, size_t len)
+/* happens on reset */
+void on_cdc_deinit_isr(void)
+{
+  ust.deinit_counter++;
+}
+
+void on_cdc_suspend_isr(void)
+{
+  ust.suspend_counter++;
+  if (!ust.is_usb_attached)
+    return;
+
+  ust.is_usb_attached = false;
+  rx_fifo_ready = false;
+  tx_fifo_ready = false;
+  fifo_reset(&uart_fifo_rx, usb_rx_buf, sizeof(usb_rx_buf));
+  fifo_reset(&uart_fifo_tx, usb_tx_buf, sizeof(usb_tx_buf));
+  osSemaphoreRelease(sema_rx_avail);
+  osSemaphoreRelease(sema_tx_fifo_non_empty);
+  osSemaphoreRelease(sema_tx_fifo_not_full);
+}
+
+void on_cdc_init_isr(void)
+{
+  ust.is_usb_attached = true;
+
+  xTaskNotifyFromISR(thread_id_uart_tx, 1, eSetBits, NULL);
+  xTaskNotifyFromISR(thread_id_uart_rx, 1, eSetBits, NULL);
+
+  ust.init_counter++;
+  osSemaphoreRelease(sema_rx_avail);
+  osSemaphoreRelease(sema_tx_fifo_non_empty);
+  osSemaphoreRelease(sema_tx_fifo_not_full);
+}
+
+void on_cdc_receive(const uint8_t *buf, size_t len)
 {
   size_t i;
+  if (!rx_fifo_ready)
+    return;
 
   for (i = 0; i < len; ++i) {
+    ust.processed_rx++;
     fifo_push(&uart_fifo_rx, buf[i]);
-    osSemaphoreRelease(rx_sema);
+    osSemaphoreRelease(sema_rx_avail);
   }
 }
 
-uint8_t cmdbuf[256];
+static uint8_t cmdbuf[256];
 int cmdbuf_cursor = 0;
-int cmdbuf_len = 0;
+static int cmdbuf_len = 0;
 
 extern void uart_send_byte(uint8_t b);
 
@@ -483,8 +576,8 @@ static bool cmdbuf_parse(struct cmd *c)
   else if (!strncmp(p, "mrw ", 4)) {
     return cmdbuf_parse_mrw(c, p + 4);
   }
-  else if (!strncmp(p, "mr ", 3)) {
-    return cmdbuf_parse_mr(c, p + 3);
+  else if (!strncmp(p, "mrd ", 4)) {
+    return cmdbuf_parse_mr(c, p + 4);
   }
   else if (!strncmp(p, "mww ", 4)) {
     return cmdbuf_parse_mww(c, p + 4);
@@ -506,35 +599,15 @@ static void msg(const char *fmt, ...)
   va_start(vl, fmt);
 
   osMutexAcquire(msg_mutex, osWaitForever);
-  n = vsnprintf(msg_buf, sizeof(msg_buf), fmt, vl);
+  n = vsnprintf((char *)msg_buf, sizeof(msg_buf), fmt, vl);
   uart_tx_fifo_push((const uint8_t *)msg_buf, n);
   osMutexRelease(msg_mutex);
   va_end(vl);
 }
 
-static bool special_symbol_active = false;
-static bool arrow_symbol_active = false;
-
-#define SYMBOL_BACKSPACE '\b'
-#define SYMBOL_ESCAPE 0x1b
-#define SYMBOL_ARROW 0x5b
-#define SYMBOL_ARROW_UP    0x41 // 'A'
-#define SYMBOL_ARROW_DOWN  0x42 // 'B'
-#define SYMBOL_ARROW_RIGHT 0x43 // 'C'
-#define SYMBOL_ARROW_LEFT  0x44 // 'D'
-
-static void app_handle_uart_rx(void)
+static void rx_on_new_char(char c)
 {
-  uint8_t c;
-  bool success;
-
-  osSemaphoreAcquire(rx_sema, osWaitForever);
-  portENTER_CRITICAL();
-  success = fifo_pop(&uart_fifo_rx, &c);
-  portEXIT_CRITICAL();
-
-  if (!success)
-    return;
+  ust.popped_from_rx_fifo++;
 
   if (special_symbol_active) {
     if (!arrow_symbol_active) {
@@ -585,27 +658,31 @@ static void app_handle_uart_rx(void)
   else if (c == '\r') {
   }
   else if (c == '\n') {
+    ust.popped_from_rx_fifo_newline++;
     struct cmd cmd;
+    bool parse_success;
 
     if (!cmdbuf_cursor) {
       cmd.cmd = CMD_NONE;
-      osMessageQueuePut(cmd_queue_handle, &cmd, 0, 0);
+      osMessageQueuePut(cmd_msg_queue, &cmd, 0, 0);
       return;
     }
 
     msg_push("\r\n", 2);
     cmdbuf[cmdbuf_cursor] = 0;
-    success = cmdbuf_parse(&cmd);
+    parse_success = cmdbuf_parse(&cmd);
 
     cmdbuf_cursor = 0;
     cmdbuf_len = 0;
 
-    if (!success) {
-      msg("unknown command\r\n>");
+    if (!parse_success) {
+      msg("unknown command ");
+      msg((const char *)cmdbuf);
+      msg(">\r\n");
       return;
     }
 
-    osMessageQueuePut(cmd_queue_handle, &cmd, 0, 0);
+    osMessageQueuePut(cmd_msg_queue, &cmd, 0, 0);
   }
   else {
     cmdbuf[cmdbuf_cursor++] = c;
@@ -615,39 +692,109 @@ static void app_handle_uart_rx(void)
   }
 }
 
-void transmit_completed_callback(void)
+static void app_uart_rx_init(void)
 {
-  // osSemaphoreRelease(tx_done_sema);
+  cmdbuf_len = 0;
+  cmdbuf_cursor = 0;
+  arrow_symbol_active = false;
+  special_symbol_active = false;
+  special_symbol_active = false;
+  sema_exhaust(sema_rx_avail);
+  rx_fifo_ready = true;
+}
+
+static inline bool uart_is_up(void)
+{
+  uint32_t flags = 0;
+  if (!ust.is_usb_attached) {
+    xTaskNotifyWait(0, 0xffffffffUL, &flags, portMAX_DELAY);
+    if (flags != 1) {
+      while(1);
+    }
+    xTaskNotify(thread_id_uart_tx, 2, eSetBits);
+    xTaskNotifyWait(0, 0xffffffffUL, &flags, portMAX_DELAY);
+    if (flags != 2) {
+      while(1);
+    }
+  }
+
+  if (rx_fifo_ready)
+    return true;
+
+  app_uart_rx_init();
+  return true;
+}
+
+static void app_handle_uart_rx(void)
+{
+  uint8_t c;
+
+  if (!uart_is_up())
+    return;
+
+  osSemaphoreAcquire(sema_rx_avail, osWaitForever);
+
+  portENTER_CRITICAL();
+  if (!rx_fifo_ready) {
+    portEXIT_CRITICAL();
+    return;
+  }
+
+  if (!fifo_pop(&uart_fifo_rx, &c))
+    Error_Handler();
+
+  portEXIT_CRITICAL();
+  rx_on_new_char(c);
+}
+
+void task_fn_uart_rx(void *argument)
+{
+  while(1) {
+    app_handle_uart_rx();
+    osThreadYield();
+  }
+}
+
+void on_cdc_transmit_done(void)
+{
 }
 
 static void app_handle_uart_tx(void)
 {
   uint8_t c;
-  bool success;
+  uint32_t total_flags = 0;
+  uint32_t flags;
 
-  osThreadYield();
-//  osSemaphoreAcquire(tx_done_sema, osWaitForever);
+  if (!ust.is_usb_attached) {
+    while (total_flags != 3) {
+      xTaskNotifyWait(0, 0xffffffffUL, &flags, portMAX_DELAY);
+      total_flags |= flags;
+    }
+
+    sema_refill(sema_tx_fifo_not_full, sizeof(usb_tx_buf) - 1);
+    sema_exhaust(sema_tx_fifo_non_empty);
+    tx_fifo_ready = true;
+    xTaskNotify(thread_id_uart_rx, 2, eSetBits);
+    osThreadYield();
+  }
+
   if (!uart_tx_is_ready())
     return;
 
-  osSemaphoreAcquire(tx_avail_sema, osWaitForever);
+  osSemaphoreAcquire(sema_tx_fifo_non_empty, osWaitForever);
   portENTER_CRITICAL();
-  success = fifo_pop(&uart_fifo_tx, &c);
-  portEXIT_CRITICAL();
-  osSemaphoreRelease(tx_free_sema);
-  if (!success)
+  if (!tx_fifo_ready) {
+    portEXIT_CRITICAL();
     return;
+  }
 
+  if (!fifo_pop(&uart_fifo_tx, &c))
+    Error_Handler();
+
+  ust.processed_tx++;
+  osSemaphoreRelease(sema_tx_fifo_not_full);
+  portEXIT_CRITICAL();
   uart_send_byte(c);
-}
-
-void task_fn_uart_rx(void *argument)
-{
-  rx_buf_stopper = 0x11223344;
-  rx_buf_stopper1 = 0xaabbccdd;
-
-  while(1)
-    app_handle_uart_rx();
 }
 
 void task_fn_uart_tx(void *argument)
@@ -727,7 +874,7 @@ static void app_process_reg_write_64(struct target *t, struct cmd *c)
   if (target_reg_write_64(t, c->arg0, regvalue))
     msg("done\r\n");
   else
-    msg("mem write 32 failed\r\n");
+    msg("failed\r\n");
 }
 
 static void app_process_reg_read_64(struct target *t, struct cmd *c)
@@ -738,7 +885,7 @@ static void app_process_reg_read_64(struct target *t, struct cmd *c)
   if (target_reg_read_64(t, c->arg0, &value))
     msg("done:" VALUE64_FMT "\r\n", VALUE64_ARG(value));
   else
-    msg("mem read 32 failed\r\n");
+    msg("failed\r\n");
 }
 
 void app_process_dump_regs(struct target *t)
@@ -772,7 +919,7 @@ void app_process_dump_regs(struct target *t)
 
 static void app_process_status(const struct target *t)
 {
-  char *p = msg_buf;
+  char *p = (char *)msg_buf;
   osMutexAcquire(msg_mutex, osWaitForever);
   msgbuf_push(p, "status: ");
 
@@ -789,7 +936,7 @@ static void app_process_status(const struct target *t)
 
 out:
   *p = 0;
-  uart_tx_fifo_push((const uint8_t *)msg_buf, p - msg_buf);
+  uart_tx_fifo_push(msg_buf, p - (char *)msg_buf);
   osMutexRelease(msg_mutex);
 }
 
@@ -798,12 +945,17 @@ void app_sm_process_next_cmd(void)
   osStatus_t status;
   struct cmd cmd;
   uint8_t prio;
-  uint32_t idcode;
   bool success;
 
-  status = osMessageQueueGet(cmd_queue_handle, &cmd, &prio, osWaitForever);
+  status = osMessageQueueGet(cmd_msg_queue, &cmd, &prio, osWaitForever);
+
   if (status != osOK)
     Error_Handler();
+
+  if (!ust.is_usb_attached) {
+    osMessageQueueReset(cmd_msg_queue);
+    return;
+  }
 
   switch(cmd.cmd) {
     case CMD_NONE:

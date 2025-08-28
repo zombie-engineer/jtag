@@ -192,6 +192,11 @@ class SDHOST:
     self.__r.cdiv_write(0x7ff)
     time.sleep(300 * 0.001 * 0.001)
     print('reset done')
+    print(f'HCFG:0x{self.__r.hcfg_read():08x}')
+    print(f'HSTS:0x{self.__r.hsts_read():08x}')
+    print(f'VDD:0x{self.__r.vdd_read():08x}')
+    print(f'CDIV:0x{self.__r.cdiv_read():08x}')
+    print(f'TOUT:0x{self.__r.tout_read():08x}')
 
   def __gen_cmd(self, is_acmd, cmd_idx):
     dbase = sdhc.sd_acommands if is_acmd else sdhc.sd_commands
@@ -210,7 +215,7 @@ class SDHOST:
     while True:
       status = self.__r.hsts_read()
       if status & SDHOST_HSTS_DATA:
-        print('status: {status:08x}')
+        print(f'status: {status:08x}')
         return status
 
   def cmd(self, is_acmd, cmd_idx, blksize, arg, read_resp=False, data_size=0):
@@ -245,7 +250,9 @@ class SDHOST:
 #      self.__log.warning(f'clearing stale interrupt {intr:08x}')
 #      self.interrupt_write(intr)
 #
-    self.__r.cmd_write(self.__gen_cmd(is_acmd, cmd_idx))
+    cmdreg = self.__gen_cmd(is_acmd, cmd_idx)
+    print(f'CMD{cmd_idx}: {cmdreg:08x}, arg:{arg:08x}')
+    self.__r.cmd_write(cmdreg)
 
     while True:
       cmdreg = self.__r.cmd_read()
@@ -290,6 +297,7 @@ class SDHOST:
 
     if num_words32:
       print()
+    print('>done')
 
     self.__t.debug_tty_read = old_debug_value
     self.__t.debug_tty_write = old_debug_value2

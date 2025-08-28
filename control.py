@@ -209,12 +209,19 @@ class Target:
     value = int(lines, base=0)
     return value
 
+  def mem_read64(self, address):
+    self.write(f'mrd 0x{address:08x} 1')
+    lines = self.wait_cursor()
+    lines = lines[-2]
+    value = int(lines, base=0)
+    return value
+
   def mem_write32(self, address, value):
     self.write(f'mww 0x{address:08x} 0x{value:08x}')
     self.wait_cursor()
 
   def mem_read(self, address, size):
-    self.write(f'mr 0x{address:08x} {size}')
+    self.write(f'mrd 0x{address:08x} {size}')
     lines = self.wait_cursor()
     logging.debug(lines)
 
@@ -421,6 +428,10 @@ class Soc:
   def read_mem32(self, address):
     return self.__t.mem_read32(address)
 
+  def read_mem64(self, address):
+    print('read_mem64')
+    return self.__t.mem_read64(address)
+
   def write_mem32(self, address, v):
     self.__t.mem_write32(address, v)
 
@@ -555,6 +566,10 @@ def target_attach_and_halt(ttydev, baudrate):
   if not status.attached:
     t.init()
     status = t.get_status()
+    if not status.attached:
+      print('Target not attached, exiting ...')
+      sys.exit(-1)
+
   if not status.halted:
     t.halt()
     status = t.get_status()
@@ -687,8 +702,8 @@ def action_sdhc(soc):
   read_sector(sd)
 
 
-def do_main(action):
-  soc = target_attach_and_halt('/dev/ttyACM0', 115200 * 8)
+def do_main(ttydev, action):
+  soc = target_attach_and_halt(ttydev, 115200 * 8)
   if action == 'reset':
     logging.info('resetting')
     soc.reset()
@@ -701,12 +716,16 @@ def do_main(action):
     addr = int(action[3:], 0)
     v = soc.read_mem32(addr)
     print(f'read_mem32 result: 0x{addr:08x}: 0x{v:08x}')
+  elif action.startswith('r64'):
+    addr = int(action[3:], 0)
+    v = soc.read_mem64(addr)
+    print(f'read_mem64 result: 0x{addr:08x}: 0x{v:08x}')
   else:
     action_sdhc(soc)
   sys.exit(0)
 
 
-def main():
+def main(ttydev):
   parser = argparse.ArgumentParser()
 
   parser.add_argument('-v', '--verbose',
@@ -716,6 +735,11 @@ def main():
     const=logging.DEBUG,
     default=logging.INFO)
 
+  parser.add_argument('-t', '--tty',
+    help='tty device',
+    dest='ttydev',
+    default='/dev/ttyACM0')
+
   parser.add_argument("action", nargs="?", default="default",
     help="Action to perform")
 
@@ -723,11 +747,11 @@ def main():
   print(args)
   logging.basicConfig(format='%(levelname)s:%(message)s', level=args.loglevel)
   try:
-    do_main(args.action)
+    do_main(args.ttydev, args.action)
   except serial.SerialException as e:
     print(f"Serial error: {e}")
   except KeyboardInterrupt:
     print("Exiting program.")
 
 if __name__ == "__main__":
-  main()
+  main(sys.argv[1])

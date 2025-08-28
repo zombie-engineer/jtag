@@ -100,13 +100,15 @@ EndBSPDependencies */
   */
 
 
-extern void transmit_completed_callback(void);
+extern void on_cdc_transmit_done(void);
 
 static uint8_t  USBD_CDC_Init(USBD_HandleTypeDef *pdev,
                               uint8_t cfgidx);
 
 static uint8_t  USBD_CDC_DeInit(USBD_HandleTypeDef *pdev,
                                 uint8_t cfgidx);
+
+static void USBD_CDC_Suspend(USBD_HandleTypeDef *pdev);
 
 static uint8_t  USBD_CDC_Setup(USBD_HandleTypeDef *pdev,
                                USBD_SetupReqTypedef *req);
@@ -158,6 +160,7 @@ USBD_ClassTypeDef  USBD_CDC =
 {
   USBD_CDC_Init,
   USBD_CDC_DeInit,
+  USBD_CDC_Suspend,
   USBD_CDC_Setup,
   NULL,                 /* EP0_TxSent, */
   USBD_CDC_EP0_RxReady,
@@ -525,7 +528,7 @@ static uint8_t  USBD_CDC_Init(USBD_HandleTypeDef *pdev, uint8_t cfgidx)
     hcdc->TxState = 0U;
     hcdc->RxState = 0U;
 
-    transmit_completed_callback();
+    on_cdc_transmit_done();
 
     if (pdev->dev_speed == USBD_SPEED_HIGH)
     {
@@ -575,6 +578,14 @@ static uint8_t  USBD_CDC_DeInit(USBD_HandleTypeDef *pdev, uint8_t cfgidx)
   }
 
   return ret;
+}
+
+static void USBD_CDC_Suspend(USBD_HandleTypeDef *pdev)
+{
+  USBD_CDC_ItfTypeDef *ops = (void *)pdev->pUserData;
+
+  if (ops && ops->Suspend)
+    ops->Suspend();
 }
 
 /**
@@ -695,7 +706,7 @@ static uint8_t  USBD_CDC_DataIn(USBD_HandleTypeDef *pdev, uint8_t epnum)
     }
     else
     {
-      transmit_completed_callback();
+      on_cdc_transmit_done();
       hcdc->TxState = 0U;
     }
     return USBD_OK;

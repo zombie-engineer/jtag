@@ -27,7 +27,7 @@ uint32_t task_stack_default[128 * 6];
 
 osThreadId_t defaultTaskHandle;
 StaticTask_t task_cb_default;
-const osThreadAttr_t defaultTask_attributes = {
+const osThreadAttr_t application_thread_attrs = {
   .name = "defaultTask",
   .cb_mem = &task_cb_default,
   .cb_size = sizeof(task_cb_default),
@@ -40,8 +40,8 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
-void StartDefaultTask(void *argument);
 
+#if 0
 struct component_hdr {
   uint32_t memtype;
   uint32_t pidr4;
@@ -59,6 +59,15 @@ struct component_hdr {
 };
 
 struct component_hdr h;
+#endif
+
+static void application_thread_fn(void *argument)
+{
+  MX_USB_DEVICE_Init();
+  app_sm_init();
+  while(1)
+    app_sm_process_next_cmd();
+}
 
 int main(void)
 {
@@ -68,7 +77,9 @@ int main(void)
   MX_I2C1_Init();
   MX_SPI1_Init();
   osKernelInitialize();
-  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+  defaultTaskHandle = osThreadNew(application_thread_fn, NULL,
+    &application_thread_attrs);
+
   osKernelStart();
   while (1) {}
 }
@@ -238,14 +249,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(JTAG_RST_GPIO_Port, &GPIO_InitStruct);
-}
-
-void StartDefaultTask(void *argument)
-{
-  MX_USB_DEVICE_Init();
-  app_sm_init();
-  while(1)
-    app_sm_process_next_cmd();
 }
 
 void Error_Handler(void)

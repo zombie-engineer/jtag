@@ -102,6 +102,7 @@ typedef struct _USBD_CDC_Itf
 {
   int8_t (* Init)(void);
   int8_t (* DeInit)(void);
+  void (* Suspend)(void);
   int8_t (* Control)(uint8_t cmd, uint8_t *pbuf, uint16_t length);
   int8_t (* Receive)(uint8_t *Buf, uint32_t *Len);
 
