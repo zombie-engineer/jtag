@@ -34,6 +34,12 @@
 #define VALUE64_ARG(__v64) \
     (int)(((__v64) >> 32) & 0xffffffff), (int)((__v64) & 0xffffffff)
 
+#define CHRCMP2(__str, __c0, __c1) \
+  ((__str)[0] == (__c0) && (__str)[1] == (__c1))
+
+#define CHRCMP3(__str, __c0, __c1, __c2) \
+  ((__str)[0] == (__c0) && (__str)[1] == (__c1) && (__str)[2] == (__c2))
+
 
 struct target t;
 
@@ -58,9 +64,7 @@ typedef enum {
   CMD_TARGET_HALT         = 3,
   CMD_TARGET_RESUME       = 4,
   CMD_TARGET_SOFT_RESET   = 5,
-  CMD_TARGET_MEM_READ_32  = 6,
-  CMD_TARGET_MEM_WRITE_32 = 7,
-  CMD_TARGET_MEM_READ     = 8,
+  CMD_TARGET_MEM_ACCESS   = 6,
   CMD_TARGET_REG_WRITE_64 = 9,
   CMD_TARGET_REG_READ_64  = 10,
   CMD_TARGET_DUMP_REGS    = 11,
@@ -71,8 +75,12 @@ struct cmd {
   cmd_t cmd;
   uint32_t arg0;
   uint32_t arg1;
+
   uint32_t arg2;
   uint32_t arg3;
+  uint32_t count;
+  mem_access_size_t access_size;
+  bool is_write;
 };
 
 struct fifo {
@@ -118,7 +126,7 @@ static const osThreadAttr_t task_attrs_uart_tx = {
   .priority = (osPriority_t) osPriorityHigh,
 };
 
-static struct cmd queue_cmd_buf[2 * sizeof(uint16_t)];
+static struct cmd queue_cmd_buf[12];
 
 static StaticQueue_t queue_cmd_cb;
 
@@ -126,7 +134,7 @@ static const osMessageQueueAttr_t queue_cmd_attrs = {
   .name = "queue_cmd",
   .cb_mem = &queue_cmd_cb,
   .cb_size = sizeof(queue_cmd_cb),
-  .mq_mem = &queue_cmd_buf,
+  .mq_mem = queue_cmd_buf,
   .mq_size = sizeof(queue_cmd_buf)
 };
 
@@ -295,8 +303,6 @@ static void app_prompt(void)
 
 void app_sm_init(void)
 {
-  struct cmd c;
-
   appstate = SM_IDLING;
 
   /* creation of queue_cmd */
@@ -321,9 +327,6 @@ void app_sm_init(void)
 
   thread_id_uart_rx = osThreadNew(task_fn_uart_rx, NULL, &task_attrs_uart_rx);
   thread_id_uart_tx = osThreadNew(task_fn_uart_tx, NULL, &task_attrs_uart_tx);
-
-  c.cmd = CMD_NONE;
-  // osMessageQueuePut(cmd_msg_queue, &c, 0, 0);
 }
 
 /* happens on reset */
@@ -374,7 +377,7 @@ void on_cdc_receive(const uint8_t *buf, size_t len)
   }
 }
 
-static uint8_t cmdbuf[256];
+static char cmdbuf[256];
 int cmdbuf_cursor = 0;
 static int cmdbuf_len = 0;
 
@@ -382,168 +385,208 @@ extern void uart_send_byte(uint8_t b);
 
 extern bool uart_tx_is_ready(void);
 
-static inline bool cmdbuf_parse_mrw(struct cmd *c, const char *p)
-{
-  uint64_t addr;
-  c->cmd = CMD_TARGET_MEM_READ_32;
-  addr = strtol(p, NULL, 0);
-  c->arg0 = addr & 0xffffffff;
-  c->arg1 = (addr >> 32) & 0xffffffff;
-  return true;
-}
-
-static inline bool cmdbuf_parse_mr(struct cmd *c, const char *p)
-{
-  uint64_t addr;
-  uint32_t size;
-  c->cmd = CMD_TARGET_MEM_READ;
-  addr = strtol(p, (char **)&p, 0);
-  size = strtol(p, NULL, 0);
-  c->arg0 = addr & 0xffffffff;
-  c->arg1 = (addr >> 32) & 0xffffffff;
-  c->arg2 = size;
-  return true;
-}
-
-static inline bool cmdbuf_parse_mww(struct cmd *c, const char *p)
-{
-  uint64_t addr;
-
-  c->cmd = CMD_TARGET_MEM_WRITE_32;
-  addr = strtol(p, (char **)&p, 0);
-  c->arg0 = addr & 0xffffffff;
-  c->arg1 = (addr >> 32) & 0xffffffff;
-  c->arg2 = strtol(p, NULL, 0);
-  return true;
-}
-
 #define is_digit10(__c) (__c >= '0' && __c <= '9')
-static inline bool is_valid_regname_symbol(char c)
-{
-  return is_digit10(c)
-    || (c >= 'a' && c <= 'z')
-    || (c >= 'A' && c <= 'Z')
-    || c == '_';
-}
 
-static inline int parse_reg_name(const char **ptr)
+#define SKIP_SPACES(__ptr, __end) \
+  for (; __ptr != __end && *__ptr && *__ptr == ' '; ++__ptr);
+
+static inline int parse_reg_name(bool is_write, const char **ptr,
+  const char *end)
 {
-  int n;
-  int i0 = 0;
-  int i = 0;
   const char *p = *ptr;
-  char c;
+  int reg_idx;
+  int reg_id;
 
-  int reg_id = AARCH64_CORE_REG_UNKNOWN;
+  SKIP_SPACES(p, end);
 
-  while (1) {
-    if (i0 > 24)
-      goto out_err;
+  if (p == end || !*p)
+    return AARCH64_CORE_REG_UNKNOWN;
 
-    c = p[i0];
-    if (!c)
-      goto out_err;
-
-    if (c != ' ')
-      break;
-
-    i0++;
-  }
-
-  i = i0;
   /* parsing register name, staring from numeric is invalid */
-  if (is_digit10(c))
-    goto out_err;
+  if (is_digit10(*p))
+    return AARCH64_CORE_REG_UNKNOWN;
 
-  while(1) {
-    if (!c)
-      break;
-    /* We want to leave space in reg for last '\0' */
-    if (i - i0 > 24)
-      goto out_err;
+  if (p == end)
+    return AARCH64_CORE_REG_UNKNOWN;
 
-    if (c == ' ')
-      break;
-
-    if (!is_valid_regname_symbol(c))
-      goto out_err;
-
-    i++;
-    c = p[i];
-  }
-
-  if (p[i0] == 'x') {
-    int x_reg_index;
-    for (n = i0 + 1; n < i; ++n) {
-      if (!is_digit10(p[n]))
-        goto out_err;
+  if ((!is_write && end - p == 2) || (is_write && end - p > 3 && p[2] == ' ')) {
+    if (CHRCMP2(p, 'p', 'c')) {
+      reg_id = AARCH64_CORE_REG_PC;
+      p += 2;
+      goto out;
     }
-    int num_digits = n - i0 - 1;
-    if (!num_digits || num_digits > 2)
-      goto out_err;
-
-    x_reg_index = (p[i0 + 1] - '0');
-    if (num_digits == 2)
-      x_reg_index = x_reg_index * 10 + (p[i0 + 1] - '0');
-
-    reg_id = AARCH64_CORE_REG_X0 + x_reg_index;
-    goto out;
+    if (CHRCMP2(p, 's', 'p')) {
+      reg_id = AARCH64_CORE_REG_SP;
+      p += 2;
+      goto out;
+    }
+    return AARCH64_CORE_REG_UNKNOWN;
   }
 
-  if (p[i0] == 'p' && p[i0 + 1] == 'c') {
-    reg_id = AARCH64_CORE_REG_PC;
-    goto out;
+  if (*p != 'x')
+    return AARCH64_CORE_REG_UNKNOWN;
+
+  p++;
+  if (!is_digit10(*p))
+    return AARCH64_CORE_REG_UNKNOWN;
+
+  reg_idx = *p - '0';
+  p++;
+
+  if (p != end && is_digit10(*p)) {
+    reg_idx = reg_idx * 10 + *p - '0';
+    p++;
   }
 
-  if (p[i0] == 's' && p[i0 + 1] == 'p') {
-    reg_id = AARCH64_CORE_REG_SP;
-    goto out;
-  }
+  /* I don't expect 3 digit register names */
+  if (p != end && is_digit10(*p))
+    return AARCH64_CORE_REG_UNKNOWN;
+
+  reg_id = AARCH64_CORE_REG_X0 + reg_idx;
 
 out:
-  *ptr += i;
-
-out_err:
+  *ptr = p;
   return reg_id;
 }
 
-static inline bool cmdbuf_parse_rw(struct cmd *cmd, const char *p)
+static inline bool cmdline_parse_read_write_cmd(const char *l,
+  const char *end, struct cmd *c)
 {
-  uint64_t v;
-  int reg_id = parse_reg_name(&p);
-  if (reg_id == AARCH64_CORE_REG_UNKNOWN)
+  /*
+   * Memory read / write:
+   * access size: r8, r16, r32, r64
+   * number of elements: r32/3
+   * + address argument: r32 0x00000000, r64/8 0x00000000
+   * + write arg: w32 0x00000000 0xffffffff, w64 0x00000000 0xffff111100002222
+   * Register read / write:
+   * rr register_name
+   * rw register_name 0xffff11
+   */
+  int reg_id;
+  const char *old_l;
+  bool is_write;
+  uint64_t addr;
+  uint64_t value;
+  int count;
+  mem_access_size_t access_size;
+
+  /* smallest line is 5 chars rr X */
+  if (end - l < 4)
     return false;
 
-  v = strtoll(p, (char **)&p, 0);
-  cmd->cmd = CMD_TARGET_REG_WRITE_64;
-  cmd->arg0 = reg_id;
-  cmd->arg1 = v & 0xffffffff;
-  cmd->arg2 = (v >> 32) & 0xffffffff;
+  if (CHRCMP3(l, 'r', 'r', ' ') || CHRCMP3(l, 'r', 'w', ' ')) {
+    /* Register read / write */
+
+    is_write = l[1] == 'r';
+    l += 3;
+    reg_id = parse_reg_name(is_write, &l, end);
+    if (reg_id == AARCH64_CORE_REG_UNKNOWN)
+      return false;
+
+    SKIP_SPACES(l, end);
+
+    if (is_write) {
+      old_l = l;
+      value = strtol(l, (char **)&l, 0);
+      if (l == old_l)
+        return false;
+      SKIP_SPACES(l, end);
+    }
+
+    if (l != end)
+      return false;
+
+    c->cmd = is_write ? CMD_TARGET_REG_WRITE_64 : CMD_TARGET_REG_READ_64;
+    c->arg0 = reg_id;
+    if (is_write) {
+      c->arg1 = value & 0xffffffff;
+      c->arg2 = (value >> 32) & 0xffffffff;
+    }
+    return true;
+  }
+
+  /* Should be mem read or write */
+  if (l[0] != 'r' && l[0] != 'w')
+    return false;
+
+  is_write = l[0] == 'w';
+  l++;
+
+  if (end - l < 2)
+    return false;
+
+  if (l[0] == '8') {
+    access_size = MEM_ACCESS_SIZE_8;
+    l++;
+    goto parse_count;
+  }
+
+  if (end - l < 3)
+    return false;
+
+  if (CHRCMP2(l, '1', '6'))
+    access_size = MEM_ACCESS_SIZE_16;
+  else if (CHRCMP2(l, '3', '2'))
+    access_size = MEM_ACCESS_SIZE_32;
+  else if (CHRCMP2(l, '6', '4'))
+    access_size = MEM_ACCESS_SIZE_64;
+  else
+    return false;
+  l += 2;
+
+parse_count:
+  count = 1;
+  if (l[0] == '/') {
+    l++;
+    old_l = l;
+    count = strtol(l, (char **)&l, 0);
+    if (l == old_l)
+      return false;
+  }
+
+  if (l[0] != ' ')
+    return false;
+
+  SKIP_SPACES(l, end);
+  old_l = l;
+  addr = strtol(l, (char **)&l, 0);
+  if (l == old_l)
+    return false;
+
+  if (is_write) {
+    if (l[0] != ' ')
+      return false;
+    SKIP_SPACES(l, end);
+    old_l = l;
+    value = strtol(l, (char **)&l, 0);
+    if (l == old_l)
+      return false;
+  }
+
+  c->arg0 = addr & 0xffffffff;
+  c->arg1 = (addr >> 32) & 0xffffffff;
+  c->cmd = CMD_TARGET_MEM_ACCESS;
+  c->is_write = is_write;
+  c->access_size = access_size;
+  c->count = count;
+  if (is_write) {
+    c->arg2 = value & 0xffffffff;
+    c->arg3 = (value >> 32) & 0xffffffff;
+  }
   return true;
 }
 
-static inline bool cmdbuf_parse_rr(struct cmd *cmd, const char *p)
-{
-  int reg_id = parse_reg_name(&p);
-  if (reg_id == AARCH64_CORE_REG_UNKNOWN)
-    return false;
-
-  cmd->cmd = CMD_TARGET_REG_READ_64;
-  cmd->arg0 = reg_id;
-  return true;
-}
-
-static bool cmdbuf_parse(struct cmd *c)
+static bool cmdbuf_parse(struct cmd *c, const char *buf, const char *end)
 {
   size_t n;
-  const char *p = (const char *)cmdbuf;
+  const char *p = buf;
 
   c->arg0 = 0;
   c->arg1 = 0;
   c->arg2 = 0;
   c->arg3 = 0;
 
-  n = strnlen(p, sizeof(cmdbuf));
+  n = strnlen(p, MIN(sizeof(cmdbuf), end - buf));
   if (!n) {
     c->cmd = CMD_NONE;
     return true;
@@ -573,21 +616,8 @@ static bool cmdbuf_parse(struct cmd *c)
     c->cmd = CMD_TARGET_SOFT_RESET;
     return true;
   }
-  else if (!strncmp(p, "mrw ", 4)) {
-    return cmdbuf_parse_mrw(c, p + 4);
-  }
-  else if (!strncmp(p, "mrd ", 4)) {
-    return cmdbuf_parse_mr(c, p + 4);
-  }
-  else if (!strncmp(p, "mww ", 4)) {
-    return cmdbuf_parse_mww(c, p + 4);
-  }
-  else if (!strncmp(p, "rw ", 3)) {
-    return cmdbuf_parse_rw(c, p + 3);
-  }
-  else if (!strncmp(p, "rr ", 3)) {
-    return cmdbuf_parse_rr(c, p + 3);
-  }
+  else if (cmdline_parse_read_write_cmd(buf, end, c))
+    return true;
 
   return false;
 }
@@ -670,14 +700,14 @@ static void rx_on_new_char(char c)
 
     msg_push("\r\n", 2);
     cmdbuf[cmdbuf_cursor] = 0;
-    parse_success = cmdbuf_parse(&cmd);
+    parse_success = cmdbuf_parse(&cmd, cmdbuf, cmdbuf + cmdbuf_cursor);
 
     cmdbuf_cursor = 0;
     cmdbuf_len = 0;
 
     if (!parse_success) {
       msg("unknown command ");
-      msg((const char *)cmdbuf);
+      msg(cmdbuf);
       msg(">\r\n");
       return;
     }
@@ -811,58 +841,44 @@ void Error_Handler(void);
     return; \
   }
 
-static void app_process_mem_read_32(struct target *t, struct cmd *c)
+static void print_value(uint64_t value, mem_access_size_t access_size)
 {
-  uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
-  uint32_t value = 0;
-
-  CHECK_ATTACHED();
-
-  if (target_mem_read_32(t, addr, &value))
-    msg("0x%08x\r\n", value);
+  if (access_size == MEM_ACCESS_SIZE_32)
+    msg("0x%08x\r\n", (uint32_t)value);
   else
-    msg("mem read 32 failed\r\n");
+    msg("0x%016x\r\n", value);
 }
 
-static void app_process_mem_read(struct target *t, struct cmd *c)
+static void app_process_mem_access(struct target *t, struct cmd *c)
 {
-  uint32_t value = 0;
+  int ret;
+
   uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
-  int num_reads = (c->arg2 + 3) / 4;
+
   CHECK_ATTACHED();
 
-  if (!target_mem_read_fast_start(t, addr)) {
-    msg("error\r\n");
+  if (c->access_size != MEM_ACCESS_SIZE_32
+    && c->access_size != MEM_ACCESS_SIZE_64) {
+    msg("error: access size not supported\r\n");
     return;
   }
 
-  for (int i = 0; i < num_reads; ++i) {
-    if (!target_mem_read_fast_next(t, &value)) {
-      msg("error\r\n");
-      break;
-    }
-    msg("0x%08x\r\n", value);
+  if (c->is_write) {
+    uint64_t regvalue;
+    if (c->access_size == MEM_ACCESS_SIZE_64)
+      regvalue = (((uint64_t)(c->arg2)) << 32) | c->arg1;
+    else
+      regvalue = c->arg2;
+
+    ret = target_mem_write(t, c->access_size, addr, regvalue);
   }
-
-  if (!target_mem_read_fast_stop(t)) {
-    msg("error\r\n");
-    return;
-  }
-
-  msg("done\r\n");
-}
-
-
-static void app_process_mem_write_32(struct target *t, struct cmd *c)
-{
-  uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
-
-  CHECK_ATTACHED();
-
-  if (target_mem_write_32(t, addr, c->arg2))
-    msg("done\r\n");
   else
-    msg("mem write 32 failed\r\n");
+    ret = target_mem_read(t, c->access_size, addr, c->count, print_value);
+
+  if (ret)
+    msg("error: %d", ret);
+  else
+    msg("done");
 }
 
 static void app_process_reg_write_64(struct target *t, struct cmd *c)
@@ -988,20 +1004,8 @@ void app_sm_process_next_cmd(void)
       success = target_soft_reset(&t);
       msg("target soft reset status: %d\r\n", success ? 1 : 0);
       break;
-    case CMD_TARGET_MEM_READ_32:
-      app_process_mem_read_32(&t, &cmd);
-      break;
-    case CMD_TARGET_MEM_WRITE_32:
-      app_process_mem_write_32(&t, &cmd);
-      break;
-    case CMD_TARGET_REG_WRITE_64:
-      app_process_reg_write_64(&t, &cmd);
-      break;
-    case CMD_TARGET_REG_READ_64:
-      app_process_reg_read_64(&t, &cmd);
-      break;
-    case CMD_TARGET_MEM_READ:
-      app_process_mem_read(&t, &cmd);
+    case CMD_TARGET_MEM_ACCESS:
+      app_process_mem_access(&t, &cmd);
       break;
     case CMD_TARGET_DUMP_REGS:
       app_process_dump_regs(&t);

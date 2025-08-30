@@ -9,6 +9,7 @@ from bcm_sdhost import SDHOST
 import bcm_gpio
 import bcm_clock_manager
 import sdhc
+from elftools.elf.elffile import ELFFile
 
 CMD6_CHECK_FUNCTION  = 0
 CMD6_SWITCH_FUNCTION = 1
@@ -93,6 +94,23 @@ acmd_target_states = {
 #  div = 1000
 #  crystal = 19200000
 
+def get_symbol_address(elf_path: str, symbol_name: str) -> int | None:
+  """
+  Return the virtual address of a global variable/function symbol
+  from an ELF file. Returns None if not found.
+  """
+  with open(elf_path, 'rb') as f:
+    elf = ELFFile(f)
+    # Iterate over all sections looking for symbol tables
+    for section in elf.iter_sections():
+      if not isinstance(section, type(elf.get_section_by_name('.symtab'))):
+        continue
+      if section['sh_entsize'] == 0:
+        continue
+      for symbol in section.iter_symbols():
+        if symbol.name == symbol_name:
+          return symbol.entry['st_value']
+  return None
 
 def target_states(is_acmd, cmd_idx):
   states = acmd_target_states if is_acmd else cmd_target_states
@@ -702,7 +720,7 @@ def action_sdhc(soc):
   read_sector(sd)
 
 
-def do_main(ttydev, action):
+def do_main(ttydev, action, elf):
   soc = target_attach_and_halt(ttydev, 115200 * 8)
   if action == 'reset':
     logging.info('resetting')
@@ -711,6 +729,14 @@ def do_main(ttydev, action):
     logging.info('resuming')
     soc.resume()
   elif action == 'halt':
+    addr = get_symbol_address(elf, '__current_cpuctx')
+    v = soc.read_mem64(addr)
+    print(f'__current_cpuctx at 0x{addr:016x} = 0x{v:016x}')
+    addr = get_symbol_address(elf, 'sched')
+    v = soc.read_mem64(addr)
+    print(f'sched at 0x{addr:08x} = 0x{v:016x}')
+    v = soc.read_mem64(addr + 8)
+    print(f'sched at 0x{addr+8:08x} = 0x{v:016x}')
     pass
   elif action.startswith('r32'):
     addr = int(action[3:], 0)
@@ -740,6 +766,11 @@ def main(ttydev):
     dest='ttydev',
     default='/dev/ttyACM0')
 
+  parser.add_argument('-e', '--elf',
+    help='elf file',
+    dest='elf',
+    default='')
+
   parser.add_argument("action", nargs="?", default="default",
     help="Action to perform")
 
@@ -747,7 +778,7 @@ def main(ttydev):
   print(args)
   logging.basicConfig(format='%(levelname)s:%(message)s', level=args.loglevel)
   try:
-    do_main(args.ttydev, args.action)
+    do_main(args.ttydev, args.action, args.elf)
   except serial.SerialException as e:
     print(f"Serial error: {e}")
   except KeyboardInterrupt:

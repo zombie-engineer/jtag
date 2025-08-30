@@ -30,8 +30,13 @@ bool target_is_halted(const struct target *t);
 bool target_resume(struct target *d);
 bool target_init(struct target *t);
 bool target_soft_reset(struct target *t);
-bool target_mem_read_32(struct target *t, uint64_t addr, uint32_t *out);
-bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value);
+
+int target_mem_read(struct target *t, mem_access_size_t access_size,
+  uint64_t addr, size_t num, void (*cb)(uint64_t, mem_access_size_t));
+
+int target_mem_write(struct target *t, mem_access_size_t access_size,
+  uint64_t addr, uint64_t value);
+
 bool target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value);
 bool target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out);
 bool target_exec_instr(struct target *t, uint32_t instr);

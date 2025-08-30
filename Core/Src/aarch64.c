@@ -5,6 +5,7 @@
 #include "aarch64_edprsr.h"
 #include "aarch64_edscr.h"
 #include "common.h"
+#include <errno.h>
 
 static inline bool aarch64_set_mod_reg_bits(struct adiv5_dap *d,
   uint32_t regaddr, uint32_t *reg_cache, uint32_t mask, uint32_t value)
@@ -216,6 +217,14 @@ bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
 #define AARCH64_I_MRS(__dstreg, __srcreg) \
   (0xd5300000 | __srcreg | (__dstreg & 0x1f))
 
+/* 0xb8404401 */
+#define AARCH64_LDR_POSTINC_32(__addrreg, __dstreg) \
+  (0xb8400400 | ((4 & 0x1ff) << 12) | (__addrreg << 5)| __dstreg)
+
+#define AARCH64_LDR_POSTINC_64(__addrreg, __dstreg) \
+  (0xf8400400 | ((8 & 0x1ff) << 12) | (__addrreg << 5)| __dstreg)
+
+
 bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
   uint64_t *out_reg)
 {
@@ -423,29 +432,44 @@ bool aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
   return !aarch64_edscr_is_error(a->regs.edscr);
 }
 
-bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
-  uint64_t addr, uint32_t *out_value)
+int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
+  mem_access_size_t access_size, uint64_t addr, void *out_value)
 {
   uint64_t reg = 0;
+  uint32_t instruction;
 
   if (!aarch64_set_normal_mode(a, baseaddr))
-    return false;
+    return -EIO;
 
   if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr))
-    return false;
+    return -EIO;
+
+  if (access_size == MEM_ACCESS_SIZE_32)
+    instruction = AARCH64_LDR_POSTINC_32(AARCH64_CORE_REG_X0,
+      AARCH64_CORE_REG_X0);
+  else if (access_size == MEM_ACCESS_SIZE_64)
+    instruction = AARCH64_LDR_POSTINC_64(AARCH64_CORE_REG_X0,
+      AARCH64_CORE_REG_X0);
+  else 
+    return -ENOTSUP;
 
   /*
    * There is an issue with some of the STR/LDR instructions that can be put
-   * into EDITR to read/write memory. The once that are compiled by GCC as
+   * into EDITR to read/write memory. The ones that are compiled by GCC as
    * binary code for ldr w1, [x0] and str w1, [x0] lead to EDSCR.ERR bit set
    * to 1.
    * In Armv8 architectures manual there is a bytecode, used for
    * writing/reading values while accessing DBGDTRTX_EL0 and DBGDTRRX_EL0
    * regs. Also Openocd has precompiled bytecode for 'slow' reads.
    * These 2 work fine, so same bytecode I use here.
+   * LDR(immediate) 0xb8404401
+   * 10|111|0|00|01|0| 000000100 |01|00000|00001
+   * size=10   opc=01  imm9=4   Rn=0   Rt=1
+   * size = 10 - 32bit variant
+   * LDR <Wt> [<Xn,SP>], #4
    */
   adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
-    0xb8404401);
+    instruction);
 
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
     &a->regs.edscr);
@@ -456,25 +480,29 @@ bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
     adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
       &a->regs.edscr);
     aarch64_read_status_regs(a->dap, &a->regs, baseaddr);
-    return false;
+    return -EIO;
   }
 
-  if (!aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_X1, &reg))
-    return false;
+  if (!aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, &reg))
+    return -EIO;
 
-  *out_value = reg & 0xffffffff;
-  return true;
+  if (access_size == MEM_ACCESS_SIZE_32)
+    *(uint32_t *)out_value = (uint32_t)(reg & 0xffffffff);
+  else
+    *(uint64_t *)out_value = reg;
+
+  return 0;
 }
 
-bool aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr)
 {
   uint32_t tmp;
   if (!aarch64_set_normal_mode(a, baseaddr))
-    return false;
+    return -1;
 
   if (!aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr))
-    return false;
+    return -1;
 
   adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
     AARCH64_I_MSR(DBGDTR_EL0, X0));
@@ -483,23 +511,23 @@ bool aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
     &a->regs.edscr);
 
   if (!aarch64_set_memory_mode(a, baseaddr))
-    return false;
+    return -1;
 
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp);
-  return true;
+  return 0;
 }
 
-bool aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
   uint32_t *value)
 {
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
       value);
-  return true;
+  return 0;
 }
 
-bool aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr)
+int aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr)
 {
-  return aarch64_set_normal_mode(a, baseaddr);
+  return aarch64_set_normal_mode(a, baseaddr) ? 0 : -1;
 }
 
 bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,

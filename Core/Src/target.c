@@ -5,6 +5,8 @@
 #include "arm_cmsis.h"
 #include "cmsis_arch_id.h"
 #include "common.h"
+#include <io_api.h>
+#include <errno.h>
 
 #define ADIV5_MAX_ROM_ENTRIES 32
 
@@ -120,13 +122,50 @@ bool target_core_write_mem32(struct target_core *c, uint64_t dstaddr,
   return aarch64_write_mem32(&c->a64, c->debug, dstaddr, src, num_words);
 }
 
-bool target_core_read_mem32(struct target_core *c, uint64_t srcaddr,
-  uint32_t *dst, size_t num_words)
+static int target_core_mem_read(struct target_core *c,
+  mem_access_size_t access_size, uint64_t addr, size_t count,
+  void (*cb)(uint64_t, mem_access_size_t))
 {
-  if (!c->halted)
-    return false;
+  size_t i;
+  int ret;
+  uint64_t value;
 
-  return aarch64_read_mem32_once(&c->a64, c->debug, srcaddr, dst);
+  if (!c->halted)
+    return -EAGAIN;
+
+  if (count == 0)
+    return -EINVAL;
+
+  if (count == 1) {
+    ret = aarch64_read_mem_once(&c->a64, c->debug, access_size, addr, &value);
+    if (!ret)
+      cb(value, access_size);
+    return ret;
+  }
+
+  if (access_size != MEM_ACCESS_SIZE_32 && access_size != MEM_ACCESS_SIZE_64)
+    return -ENOTSUP;
+
+  ret = aarch64_read_mem32_fast_start(&c->a64, c->debug, addr);
+  if (ret)
+    return ret;
+
+  for (i = 0; i < count; ++i) {
+    uint64_t value;
+
+    ret = aarch64_read_mem32_fast_next(&c->a64, c->debug, (uint32_t *)&value);
+    if (ret)
+      return ret;
+
+    if (access_size == MEM_ACCESS_SIZE_64) {
+      ret = aarch64_read_mem32_fast_next(&c->a64, c->debug,
+        ((uint32_t *)&value) + 1);
+      if (ret)
+        return ret;
+    }
+    cb(value, access_size);
+  }
+  return aarch64_read_mem32_fast_stop(&c->a64, c->debug);
 }
 
 bool target_core_mem_read_fast_start(struct target_core *c, uint64_t addr)
@@ -153,8 +192,8 @@ bool target_core_mem_read_fast_stop(struct target_core *c)
   return aarch64_read_mem32_fast_stop(&c->a64, c->debug);
 }
 
-bool target_core_write_mem32_once(struct target_core *c, uint64_t dstaddr,
-    uint32_t value)
+static bool target_core_mem_write(struct target_core *c,
+  mem_access_size_t access_size, uint64_t dstaddr, uint32_t value)
 {
   if (!c->halted)
     return false;
@@ -186,11 +225,13 @@ bool raspberrypi_soft_reset(struct target *t)
     /* 0x3f100024, (0x5a << 24) | 1 */
     /* 0x3f10001c, (0x5a << 24) | 0x20 */
 
-  if (!target_core_write_mem32_once(&t->core[0], 0x3f100024, (0x5a << 24) | 1))
+  if (!target_core_mem_write(&t->core[0], MEM_ACCESS_SIZE_32, 0x3f100024,
+    (0x5a << 24) | 1))
     return false;
 
   /* Write basicly should not complete */
-  if (target_core_write_mem32_once(&t->core[0], 0x3f10001c, (0x5a << 24) | 0x20))
+  if (target_core_mem_write(&t->core[0], MEM_ACCESS_SIZE_32, 0x3f10001c,
+    (0x5a << 24) | 0x20))
     return false;
 
   return true;
@@ -247,14 +288,17 @@ bool target_init(struct target *t)
   return success;
 }
 
-bool target_mem_read_32(struct target *t, uint64_t addr, uint32_t *out)
+int target_mem_read(struct target *t, mem_access_size_t access_size,
+  uint64_t addr, size_t count, void (*cb)(uint64_t, mem_access_size_t))
 {
-  return target_core_read_mem32(&t->core[0], addr, out, 1);
+  return target_core_mem_read(&t->core[0], access_size, addr, count, cb);
 }
 
-bool target_mem_write_32(struct target *t, uint64_t addr, uint32_t value)
+int target_mem_write(struct target *t, mem_access_size_t access_size,
+  uint64_t addr, uint64_t value)
 {
-  return target_core_write_mem32_once(&t->core[0], addr, value);
+  return target_core_mem_write(&t->core[0], access_size, addr, value)
+    ? 0 : -1;
 }
 
 bool target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value)

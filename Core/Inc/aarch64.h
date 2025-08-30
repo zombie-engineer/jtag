@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/types.h>
+#include <io_api.h>
 
 #define AARCH64_CORE_REG_X0 0
 #define AARCH64_CORE_REG_X1 1
@@ -118,14 +119,22 @@ bool aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
     const uint32_t *src, size_t num_words);
 bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t value);
-bool aarch64_read_mem32_once(struct aarch64 *a, uint32_t baseaddr,
-  uint64_t addr, uint32_t *out_value);
+
+/*
+ * return values:
+ * 0 success
+ * -ENOTSUP - not supported
+ * -EIO - some error
+ */
+int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
+  mem_access_size_t access_size, uint64_t addr, void *out_value);
+
 bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value);
 bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *out);
-bool aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr);
-bool aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
   uint32_t *value);
-bool aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr);
+int aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr);
