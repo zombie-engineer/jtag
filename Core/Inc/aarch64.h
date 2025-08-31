@@ -93,31 +93,33 @@ struct aarch64 {
   struct aarch64_context ctx;
 };
 
-bool aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
+int aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
 bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr);
 
 bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr);
 
-bool aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
+int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
 
 void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool aarch64_exec(struct aarch64 *a, uint32_t baseaddr, const uint32_t *const instr, int num);
-bool aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr);
-bool aarch64_read_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
-    uint32_t *dst, size_t num_words);
-bool aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
+int aarch64_exec(struct aarch64 *a, uint32_t baseaddr,
+  const uint32_t *const instr, int num);
+
+int aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr);
+int aarch64_read_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
+  uint32_t *dst, size_t num_words);
+int aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
     const uint32_t *src, size_t num_words);
-bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t value);
 
 /*
@@ -129,9 +131,9 @@ bool aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
 int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
   mem_access_size_t access_size, uint64_t addr, void *out_value);
 
-bool aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value);
-bool aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
+int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *out);
 int aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr);

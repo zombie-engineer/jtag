@@ -26,3 +26,9 @@
 #define DBG_REG_ADDR_EDDFR_HI     0xd2c
 #define DBG_REG_ADDR_EDLAR        0xfb0
 #define DBG_REG_ADDR_EDLSR        0xfb4
+
+/* Clear Sticky Error in EDSCR */
+#define AARCH64_EDRCR_BIT_CSE 2
+/* Clear Sticky Pipeline Advance in EDSCR */
+#define AARCH64_EDRCR_BIT_CSPA 3
+

@@ -11,8 +11,7 @@ typedef enum {
   CMD_TARGET_RESUME       = 4,
   CMD_TARGET_SOFT_RESET   = 5,
   CMD_TARGET_MEM_ACCESS   = 6,
-  CMD_TARGET_REG_WRITE_64 = 9,
-  CMD_TARGET_REG_READ_64  = 10,
+  CMD_TARGET_REG_ACCESS   = 7,
   CMD_TARGET_DUMP_REGS    = 11,
   CMD_UNKNOWN
 } cmd_t;
@@ -21,7 +20,6 @@ struct cmd {
   cmd_t cmd;
   uint32_t arg0;
   uint32_t arg1;
-
   uint32_t arg2;
   uint32_t arg3;
   uint32_t count;

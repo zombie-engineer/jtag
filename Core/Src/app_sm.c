@@ -10,14 +10,15 @@
 #include "cmsis_os.h"
 #include <stdarg.h>
 #include <stdio.h>
+#include <errno.h>
 #include "common.h"
 #include "cmd.h"
-
 
 #define RX_FIFO_SIZE 256
 #define TX_FIFO_SIZE 256
 
 #define SYMBOL_BACKSPACE '\b'
+#define SYMBOL_BACKSPACE2 0x7f
 #define SYMBOL_ESCAPE 0x1b
 #define SYMBOL_ARROW 0x5b
 #define SYMBOL_ARROW_UP    0x41 // 'A'
@@ -263,9 +264,22 @@ typedef enum {
 
 app_sm_state_t appstate;
 
-static void app_prompt(void)
+static void msg(const char *fmt, ...)
 {
-  msg_push("\r\n>", 3);
+  int n;
+  va_list vl;
+  va_start(vl, fmt);
+
+  osMutexAcquire(msg_mutex, osWaitForever);
+  n = vsnprintf((char *)msg_buf, sizeof(msg_buf), fmt, vl);
+  uart_tx_fifo_push((const uint8_t *)msg_buf, n);
+  osMutexRelease(msg_mutex);
+  va_end(vl);
+}
+
+static void cmd_done(int ret)
+{
+  msg("done %d\r\n>", ret);
 }
 
 void app_sm_init(void)
@@ -352,19 +366,6 @@ extern void uart_send_byte(uint8_t b);
 
 extern bool uart_tx_is_ready(void);
 
-static void msg(const char *fmt, ...)
-{
-  int n;
-  va_list vl;
-  va_start(vl, fmt);
-
-  osMutexAcquire(msg_mutex, osWaitForever);
-  n = vsnprintf((char *)msg_buf, sizeof(msg_buf), fmt, vl);
-  uart_tx_fifo_push((const uint8_t *)msg_buf, n);
-  osMutexRelease(msg_mutex);
-  va_end(vl);
-}
-
 static void rx_on_new_char(char c)
 {
   ust.popped_from_rx_fifo++;
@@ -404,7 +405,7 @@ static void rx_on_new_char(char c)
     }
   }
 
-  if (c == SYMBOL_BACKSPACE) {
+  if (c == SYMBOL_BACKSPACE || c == SYMBOL_BACKSPACE2) {
     if (cmdbuf_cursor) {
       cmdbuf_cursor--;
       msg_push("\b \b", 3);
@@ -438,7 +439,8 @@ static void rx_on_new_char(char c)
     if (!parse_success) {
       msg("unknown command ");
       msg(cmdbuf);
-      msg(">\r\n");
+      msg("\r\n");
+      cmd_done(-EINVAL);
       return;
     }
 
@@ -567,8 +569,8 @@ void Error_Handler(void);
 
 #define CHECK_ATTACHED() \
   if (!t->attached) { \
-    msg("error: not attached\r\n"); \
-    return; \
+    msg("error: not attached"); \
+    return -EPIPE; \
   }
 
 static void print_value(uint64_t value, mem_access_size_t access_size)
@@ -576,13 +578,12 @@ static void print_value(uint64_t value, mem_access_size_t access_size)
   if (access_size == MEM_ACCESS_SIZE_32)
     msg("0x%08x\r\n", (uint32_t)value);
   else
-    msg("0x%016x\r\n", value);
+    msg(VALUE64_FMT "\r\n", VALUE64_ARG(value));
 }
 
-static void app_process_mem_access(struct target *t, struct cmd *c)
+static int app_process_mem_access(struct target *t, struct cmd *c)
 {
-  int ret;
-
+  uint64_t value;
   uint64_t addr = (((uint64_t)(c->arg1)) << 32) | c->arg0;
 
   CHECK_ATTACHED();
@@ -590,51 +591,40 @@ static void app_process_mem_access(struct target *t, struct cmd *c)
   if (c->access_size != MEM_ACCESS_SIZE_32
     && c->access_size != MEM_ACCESS_SIZE_64) {
     msg("error: access size not supported\r\n");
-    return;
+    return -ENOTSUP;
   }
 
   if (c->is_write) {
-    uint64_t regvalue;
     if (c->access_size == MEM_ACCESS_SIZE_64)
-      regvalue = (((uint64_t)(c->arg2)) << 32) | c->arg1;
+      value = (((uint64_t)(c->arg3)) << 32) | c->arg2;
     else
-      regvalue = c->arg2;
+      value = c->arg2;
 
-    ret = target_mem_write(t, c->access_size, addr, regvalue);
+    return target_mem_write(t, c->access_size, addr, value);
   }
-  else
-    ret = target_mem_read(t, c->access_size, addr, c->count, print_value);
-
-  if (ret)
-    msg("error: %d", ret);
-  else
-    msg("done");
+  return target_mem_read(t, c->access_size, addr, c->count, print_value);
 }
 
-static void app_process_reg_write_64(struct target *t, struct cmd *c)
+static int app_process_reg_access(struct target *t, struct cmd *c)
 {
-  uint64_t regvalue = (((uint64_t)(c->arg2)) << 32) | c->arg1;
+  int ret;
+
+  uint64_t value;
 
   CHECK_ATTACHED();
 
-  if (target_reg_write_64(t, c->arg0, regvalue))
-    msg("done\r\n");
-  else
-    msg("failed\r\n");
+  if (c->is_write) {
+    value = (((uint64_t)(c->arg2)) << 32) | c->arg1;
+    ret = target_reg_write_64(t, c->arg0, value);
+  } else {
+    ret = target_reg_read_64(t, c->arg0, &value);
+    if (!ret)
+      print_value(value, MEM_ACCESS_SIZE_64);
+  }
+  return ret;
 }
 
-static void app_process_reg_read_64(struct target *t, struct cmd *c)
-{
-  uint64_t value = 0;
-  CHECK_ATTACHED();
-
-  if (target_reg_read_64(t, c->arg0, &value))
-    msg("done:" VALUE64_FMT "\r\n", VALUE64_ARG(value));
-  else
-    msg("failed\r\n");
-}
-
-void app_process_dump_regs(struct target *t)
+static int app_process_dump_regs(struct target *t)
 {
   int i, j;
   struct target_core *c;
@@ -646,15 +636,16 @@ void app_process_dump_regs(struct target *t)
     c = &t->core[i];
     if (!c->halted)
       continue;
-    core_ctx = &c->a64.ctx;
-    for (j = 0; j < ARRAY_SIZE(core_ctx->x0_30); ++j) {
-      msg("%d,x%d," VALUE64_FMT "\r\n", i, j, VALUE64_ARG(core_ctx->x0_30[j]));
-    }
 
-    msg("%d,sp," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->sp));
-    msg("%d,pc," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->pc));
+    core_ctx = &c->a64.ctx;
+    for (j = 0; j < ARRAY_SIZE(core_ctx->x0_30); ++j)
+      msg("%d,x%d," VALUE64_FMT "\r\n", i, j, VALUE64_ARG(core_ctx->x0_30[j]));
+
+    msg("%d, sp," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->sp));
+    msg("%d, pc," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->pc));
   }
-  msg("done\r\n");
+
+  return 0;
 }
 
 #define msgbuf_push(__ptr, __s) \
@@ -663,14 +654,16 @@ void app_process_dump_regs(struct target *t)
     __ptr += sizeof(__s) - 1; \
   } while(0)
 
-static void app_process_status(const struct target *t)
+static int app_process_status(const struct target *t)
 {
+  int ret;
   char *p = (char *)msg_buf;
   osMutexAcquire(msg_mutex, osWaitForever);
   msgbuf_push(p, "status: ");
 
   if (!t->attached) {
     msgbuf_push(p, "not attached\r\n");
+    ret = -1;
     goto out;
   }
 
@@ -680,18 +673,20 @@ static void app_process_status(const struct target *t)
   else
     msgbuf_push(p, "running\r\n");
 
+  ret = 0;
 out:
   *p = 0;
   uart_tx_fifo_push(msg_buf, p - (char *)msg_buf);
   osMutexRelease(msg_mutex);
+  return ret;
 }
 
 void app_sm_process_next_cmd(void)
 {
+  int ret;
   osStatus_t status;
   struct cmd cmd;
   uint8_t prio;
-  bool success;
 
   status = osMessageQueueGet(cmd_msg_queue, &cmd, &prio, osWaitForever);
 
@@ -705,43 +700,47 @@ void app_sm_process_next_cmd(void)
 
   switch(cmd.cmd) {
     case CMD_NONE:
+      ret = 0;
       break;
     case CMD_TARGET_STATUS:
-      app_process_status(&t);
+      ret = app_process_status(&t);
       break;
     case CMD_TARGET_INIT:
-      target_init(&t);
+      ret = target_init(&t);
       msg("target initialized: %08x\r\n", t.idcode);
       break;
     case CMD_TARGET_HALT:
       if (!t.attached) {
-        msg("target not attached, can not halt\n");
+        msg("target not attached, can not halt\r\n");
+        ret = -EINVAL;
       }
-      else {
-        success = target_halt(&t);
-        msg("target halt status: %d\r\n", success ? 1 : 0);
-      }
+      else
+        ret = target_halt(&t);
       break;
     case CMD_TARGET_RESUME:
-      if (target_is_halted(&t)) {
-        success = target_resume(&t);
-        msg("target resume status: %d\r\n", success ? 1 : 0);
-      } else {
-        msg("target not halted.\r\n");
+      if (target_is_halted(&t))
+        ret = target_resume(&t);
+      else {
+        msg("target not halted\r\n");
+        ret = -EINVAL;
       }
       break;
     case CMD_TARGET_SOFT_RESET:
-      success = target_soft_reset(&t);
-      msg("target soft reset status: %d\r\n", success ? 1 : 0);
+      ret = target_soft_reset(&t);
       break;
     case CMD_TARGET_MEM_ACCESS:
-      app_process_mem_access(&t, &cmd);
+      ret = app_process_mem_access(&t, &cmd);
+      break;
+    case CMD_TARGET_REG_ACCESS:
+      ret = app_process_reg_access(&t, &cmd);
       break;
     case CMD_TARGET_DUMP_REGS:
-      app_process_dump_regs(&t);
+      ret = app_process_dump_regs(&t);
       break;
     default:
+      ret = -EINVAL;
       break;
   }
-  app_prompt();
+
+  cmd_done(ret);
 }

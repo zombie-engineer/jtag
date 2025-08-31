@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <errno.h>
 
 #define DP 0
 #define AP 1
@@ -35,10 +36,11 @@ bool adiv5_mem_ap_read_word_drw(struct adiv5_dap *d, uint32_t addr,
   uint32_t *out);
 
 bool adiv5_mem_ap_read_word(struct adiv5_dap *d, uint32_t addr, uint32_t *out);
+
 #define adiv5_mem_ap_read_word_e(d, addr, out) \
   do { \
     if (!adiv5_mem_ap_read_word(d, addr, out)) \
-      return false; \
+      return -EIO; \
   } while(0)
 
 bool adiv5_mem_ap_write_word(struct adiv5_dap *d, uint32_t addr,

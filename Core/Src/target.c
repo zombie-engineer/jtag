@@ -10,34 +10,35 @@
 
 #define ADIV5_MAX_ROM_ENTRIES 32
 
-bool target_core_halt(struct target_core *c)
+int target_core_halt(struct target_core *c)
 {
-  if (!aarch64_halt(&c->a64, c->debug, c->cti))
-    return false;
+  int ret = aarch64_halt(&c->a64, c->debug, c->cti);
+  if (ret)
+    return ret;
 
   c->halted = true;
   return aarch64_fetch_context(&c->a64, c->debug);
 }
 
-bool target_core_resume(struct target_core *c)
+int target_core_resume(struct target_core *c)
 {
-  bool success;
+  int ret;
 
   if (!c->halted)
-    return false;
+    return -EINVAL;
 
-  success = aarch64_restore_before_resume(&c->a64, c->debug);
-  if (!success)
-    return false;
+  ret = aarch64_restore_before_resume(&c->a64, c->debug);
+  if (ret)
+    return ret;
 
-  success = aarch64_resume(&c->a64, c->debug, c->cti);
-  if (success)
+  ret = aarch64_resume(&c->a64, c->debug, c->cti);
+  if (!ret)
     c->halted = false;
 
-  return success;
+  return ret;
 }
 
-bool target_halt(struct target *t)
+int target_halt(struct target *t)
 {
   return target_core_halt(&t->core[0]);
 }
@@ -47,7 +48,7 @@ bool target_is_halted(const struct target *t)
   return t->core[0].halted;
 }
 
-bool target_resume(struct target *t)
+int target_resume(struct target *t)
 {
   return target_core_resume(&t->core[0]);
 }
@@ -105,21 +106,13 @@ static bool target_parse_rom(struct target *t)
   return true;
 }
 
-bool target_core_exec(struct target_core *c, const uint32_t * const instr, int num)
+int target_core_exec(struct target_core *c, const uint32_t * const instr,
+  int num)
 {
   if (!c->halted)
-    return false;
+    return -EPIPE;
 
   return aarch64_exec(&c->a64, c->debug, instr, num);
-}
-
-bool target_core_write_mem32(struct target_core *c, uint64_t dstaddr,
-    const uint32_t *src, size_t num_words)
-{
-  if (!c->halted)
-    return false;
-
-  return aarch64_write_mem32(&c->a64, c->debug, dstaddr, src, num_words);
 }
 
 static int target_core_mem_read(struct target_core *c,
@@ -131,7 +124,7 @@ static int target_core_mem_read(struct target_core *c,
   uint64_t value;
 
   if (!c->halted)
-    return -EAGAIN;
+    return -EPIPE;
 
   if (count == 0)
     return -EINVAL;
@@ -168,124 +161,122 @@ static int target_core_mem_read(struct target_core *c,
   return aarch64_read_mem32_fast_stop(&c->a64, c->debug);
 }
 
-bool target_core_mem_read_fast_start(struct target_core *c, uint64_t addr)
+int target_core_mem_read_fast_start(struct target_core *c, uint64_t addr)
 {
   if (!c->halted)
-    return false;
+    return -EPIPE;
 
   return aarch64_read_mem32_fast_start(&c->a64, c->debug, addr);
 }
 
-bool target_core_mem_read_fast_next(struct target_core *c, uint32_t *value)
+int target_core_mem_read_fast_next(struct target_core *c, uint32_t *value)
 {
   if (!c->halted)
-    return false;
+    return -EPIPE;
 
   return aarch64_read_mem32_fast_next(&c->a64, c->debug, value);
 }
 
-bool target_core_mem_read_fast_stop(struct target_core *c)
+int target_core_mem_read_fast_stop(struct target_core *c)
 {
   if (!c->halted)
-    return false;
+    return -EPIPE;
 
   return aarch64_read_mem32_fast_stop(&c->a64, c->debug);
 }
 
-static bool target_core_mem_write(struct target_core *c,
+static int target_core_mem_write(struct target_core *c,
   mem_access_size_t access_size, uint64_t dstaddr, uint32_t value)
 {
   if (!c->halted)
-    return false;
+    return -EPIPE;
 
   return aarch64_write_mem32_once(&c->a64, c->debug, dstaddr, value);
 }
 
-bool target_core_reg_write64(struct target_core *c, uint32_t reg_id,
+int target_core_reg_write64(struct target_core *c, uint32_t reg_id,
   uint64_t value)
 {
   if (!c->halted)
-    return false;
+    return -EPIPE;
 
   return aarch64_write_core_reg(&c->a64, c->debug, reg_id, value);
 }
 
-bool target_core_reg_read64(struct target_core *c, uint32_t reg_id,
+int target_core_reg_read64(struct target_core *c, uint32_t reg_id,
   uint64_t *out)
 {
   if (!c->halted)
-    return false;
+    return -EPIPE;
 
   return aarch64_read_core_reg(&c->a64, c->debug, reg_id, out);
 }
 
-bool raspberrypi_soft_reset(struct target *t)
+int raspberrypi_soft_reset(struct target *t)
 {
+  int ret;
     /* Raspberry PI reset sequence */
     /* 0x3f100024, (0x5a << 24) | 1 */
     /* 0x3f10001c, (0x5a << 24) | 0x20 */
 
-  if (!target_core_mem_write(&t->core[0], MEM_ACCESS_SIZE_32, 0x3f100024,
-    (0x5a << 24) | 1))
-    return false;
+  ret = target_core_mem_write(&t->core[0], MEM_ACCESS_SIZE_32, 0x3f100024,
+    (0x5a << 24) | 1);
+  if (ret)
+    return ret;
 
   /* Write basicly should not complete */
-  if (target_core_mem_write(&t->core[0], MEM_ACCESS_SIZE_32, 0x3f10001c,
-    (0x5a << 24) | 0x20))
-    return false;
-
-  return true;
+  return target_core_mem_write(&t->core[0], MEM_ACCESS_SIZE_32, 0x3f10001c,
+    (0x5a << 24) | 0x20);
 }
 
-bool target_soft_reset(struct target *t)
+int target_soft_reset(struct target *t)
 {
-  if (raspberrypi_soft_reset(t)) {
+  int ret = raspberrypi_soft_reset(t);
+  if (!ret) {
     t->attached = false;
     t->core[0].halted = false;
-    return true;
   }
 
-  return false;
+  return ret;
 }
 
-bool target_init(struct target *t)
+int target_init(struct target *t)
 {
   int i;
   int num_devs;
-  bool success;
+  int ret = 0;
 
   jtag_init();
   jtag_reset();
 
   num_devs = jtag_scan_num_devs();
   if (!num_devs)
-    return false;
+    return -EIO;
 
   t->idcode = jtag_read_idcode();
   if (!t->idcode || t->idcode == 0xffffffff)
-    return false;
+    return -EIO;
 
   if (!adiv5_dap_init(&t->dap))
-    return false;
+    return -EIO;
 
   if (!target_parse_rom(t))
-    return false;
+    return -EIO;
 
   t->core[0].cti = 0x80018000;
   t->core[1].cti = 0x80019000;
   t->core[2].cti = 0x8001a000;
   t->core[3].cti = 0x8001b000;
 
-  success = true;
-  for (i = 0; i < 4 && success; ++i)
-    success = aarch64_init(&t->core[i].a64, &t->dap, t->core[i].debug,
+  for (i = 0; i < 4 && !ret; ++i)
+    ret = aarch64_init(&t->core[i].a64, &t->dap, t->core[i].debug,
       t->core[i].cti);
 
-  if (success) {
+  if (!ret) {
     t->attached = true;
     t->core[0].halted = false;
   }
-  return success;
+  return ret;
 }
 
 int target_mem_read(struct target *t, mem_access_size_t access_size,
@@ -297,31 +288,30 @@ int target_mem_read(struct target *t, mem_access_size_t access_size,
 int target_mem_write(struct target *t, mem_access_size_t access_size,
   uint64_t addr, uint64_t value)
 {
-  return target_core_mem_write(&t->core[0], access_size, addr, value)
-    ? 0 : -1;
+  return target_core_mem_write(&t->core[0], access_size, addr, value);
 }
 
-bool target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value)
+int target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value)
 {
   return target_core_reg_write64(&t->core[0], reg_id, value);
 }
 
-bool target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out)
+int target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out)
 {
   return target_core_reg_read64(&t->core[0], reg_id, out);
 }
 
-bool target_mem_read_fast_start(struct target *t, uint64_t addr)
+int target_mem_read_fast_start(struct target *t, uint64_t addr)
 {
   return target_core_mem_read_fast_start(&t->core[0], addr);
 }
 
-bool target_mem_read_fast_next(struct target *t, uint32_t *value)
+int target_mem_read_fast_next(struct target *t, uint32_t *value)
 {
   return target_core_mem_read_fast_next(&t->core[0], value);
 }
 
-bool target_mem_read_fast_stop(struct target *t)
+int target_mem_read_fast_stop(struct target *t)
 {
   return target_core_mem_read_fast_stop(&t->core[0]);
 }

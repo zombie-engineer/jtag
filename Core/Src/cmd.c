@@ -46,7 +46,6 @@ static inline int parse_reg_name(bool is_write, const char **ptr,
       p += 2;
       goto out;
     }
-    return AARCH64_CORE_REG_UNKNOWN;
   }
 
   if (*p != 'x')
@@ -96,6 +95,8 @@ static inline bool cmdline_parse_read_write_cmd(const char *l,
   int count;
   mem_access_size_t access_size;
 
+  SKIP_SPACES(l, end);
+
   /* smallest line is 5 chars rr X */
   if (end - l < 4)
     return false;
@@ -103,7 +104,7 @@ static inline bool cmdline_parse_read_write_cmd(const char *l,
   if (CHRCMP3(l, 'r', 'r', ' ') || CHRCMP3(l, 'r', 'w', ' ')) {
     /* Register read / write */
 
-    is_write = l[1] == 'r';
+    is_write = l[1] == 'w';
     l += 3;
     reg_id = parse_reg_name(is_write, &l, end);
     if (reg_id == AARCH64_CORE_REG_UNKNOWN)
@@ -113,21 +114,25 @@ static inline bool cmdline_parse_read_write_cmd(const char *l,
 
     if (is_write) {
       old_l = l;
-      value = strtol(l, (char **)&l, 0);
+      value = strtoull(l, (char **)&l, 0);
       if (l == old_l)
         return false;
+
       SKIP_SPACES(l, end);
     }
 
     if (l != end)
       return false;
 
-    c->cmd = is_write ? CMD_TARGET_REG_WRITE_64 : CMD_TARGET_REG_READ_64;
+    c->cmd = CMD_TARGET_REG_ACCESS;
     c->arg0 = reg_id;
+
     if (is_write) {
       c->arg1 = value & 0xffffffff;
       c->arg2 = (value >> 32) & 0xffffffff;
     }
+
+    c->is_write = is_write;
     return true;
   }
 
@@ -175,7 +180,7 @@ parse_count:
 
   SKIP_SPACES(l, end);
   old_l = l;
-  addr = strtol(l, (char **)&l, 0);
+  addr = strtoull(l, (char **)&l, 0);
   if (l == old_l)
     return false;
 
@@ -184,7 +189,7 @@ parse_count:
       return false;
     SKIP_SPACES(l, end);
     old_l = l;
-    value = strtol(l, (char **)&l, 0);
+    value = strtoull(l, (char **)&l, 0);
     if (l == old_l)
       return false;
   }
