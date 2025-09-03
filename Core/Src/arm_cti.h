@@ -14,3 +14,4 @@ void cti_gate_channel(struct adiv5_dap *d, uint32_t cti_base, int channel);
 void cti_ungate_channel(struct adiv5_dap *d, uint32_t cti_base, int channel);
 
 void cti_ack(struct adiv5_dap *d, uint32_t cti_base);
+void cti_ack2(struct adiv5_dap *d, uint32_t cti_base, uint32_t event);

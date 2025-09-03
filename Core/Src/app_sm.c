@@ -725,6 +725,14 @@ void app_sm_process_next_cmd(void)
         ret = -EINVAL;
       }
       break;
+    case CMD_TARGET_STEP:
+      if (target_is_halted(&t))
+        ret = target_step(&t);
+      else {
+        msg("target not halted\r\n");
+        ret = -EINVAL;
+      }
+      break;
     case CMD_TARGET_SOFT_RESET:
       ret = target_soft_reset(&t);
       break;

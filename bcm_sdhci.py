@@ -86,85 +86,85 @@ class SDHCI:
     self.__log = log
 
   def arg2_read(self):
-    return self.__t.mem_read32(SDHCI_ARG2)
+    return self.__t.mem_read32(SDHCI_ARG2)[0]
 
   def blkszcnt_read(self):
-    return self.__t.mem_read32(SDHCI_BLKSZCNT)
+    return self.__t.mem_read32(SDHCI_BLKSZCNT)[0]
 
   def blkszcnt_write(self, v):
     self.__t.mem_write32(SDHCI_BLKSZCNT, v)
 
   def arg1_read(self):
-    return self.__t.mem_read32(SDHCI_ARG1)
+    return self.__t.mem_read32(SDHCI_ARG1)[0]
 
   def arg1_write(self, v):
     return self.__t.mem_write32(SDHCI_ARG1, v)
 
   def cmdtm_read(self):
-    return self.__t.mem_read32(SDHCI_CMDTM)
+    return self.__t.mem_read32(SDHCI_CMDTM)[0]
 
   def cmdtm_write(self, v):
     return self.__t.mem_write32(SDHCI_CMDTM, v)
 
   def resp0_read(self):
-    return self.__t.mem_read32(SDHCI_RESP0)
+    return self.__t.mem_read32(SDHCI_RESP0)[0]
 
   def resp1_read(self):
-    return self.__t.mem_read32(SDHCI_RESP1)
+    return self.__t.mem_read32(SDHCI_RESP1)[0]
 
   def resp2_read(self):
-    return self.__t.mem_read32(SDHCI_RESP2)
+    return self.__t.mem_read32(SDHCI_RESP2)[0]
 
   def resp3_read(self):
-    return self.__t.mem_read32(SDHCI_RESP3)
+    return self.__t.mem_read32(SDHCI_RESP3)[0]
 
   def data_read(self):
-    return self.__t.mem_read32(SDHCI_DATA)
+    return self.__t.mem_read32(SDHCI_DATA)[0]
 
   def status_read(self):
-    return self.__t.mem_read32(SDHCI_STATUS)
+    return self.__t.mem_read32(SDHCI_STATUS)[0]
 
   def control0_write(self, v):
     self.__t.mem_write32(SDHCI_CONTROL0, v)
 
   def control0_read(self):
-    return self.__t.mem_read32(SDHCI_CONTROL0)
+    return self.__t.mem_read32(SDHCI_CONTROL0)[0]
 
   def control1_read(self):
-    return self.__t.mem_read32(SDHCI_CONTROL1)
+    return self.__t.mem_read32(SDHCI_CONTROL1)[0]
 
   def control1_write(self, v):
     self.__t.mem_write32(SDHCI_CONTROL1, v)
 
   def interrupt_read(self):
-    return self.__t.mem_read32(SDHCI_INTERRUPT)
+    return self.__t.mem_read32(SDHCI_INTERRUPT)[0]
 
   def interrupt_write(self, v):
     self.__t.mem_write32(SDHCI_INTERRUPT, v)
 
   def int_mask_read(self):
-    return self.__t.mem_read32(SDHCI_INT_MASK)
+    return self.__t.mem_read32(SDHCI_INT_MASK)[0]
 
   def int_mask_write(self, v):
     self.__t.mem_write32(SDHCI_INT_MASK, v)
 
   def int_en_read(self):
-    return self.__t.mem_read32(SDHCI_INT_EN)
+    return self.__t.mem_read32(SDHCI_INT_EN)[0]
 
   def int_en_write(self, v):
     self.__t.mem_write32(SDHCI_INT_EN, v)
 
   def control2_read(self):
-    return self.__t.mem_read32(SDHCI_CONTROL2)
+    return self.__t.mem_read32(SDHCI_CONTROL2)[0]
 
   def control2_write(self, v):
     self.__t.mem_write32(SDHCI_CONTROL2, v)
 
   def caps_0_read(self):
-    return self.__t.mem_read32(SDHCI_CAPS_0)
+    return self.__t.mem_read32(SDHCI_CAPS_0)[0]
 
   def caps_1_read(self):
-    return self.__t.mem_read32(SDHCI_CAPS_1)
+    return self.__t.mem_read32(SDHCI_CAPS_1)[0]
 
   def set_clock(self, setup):
  #     div = 4 if setup else 64

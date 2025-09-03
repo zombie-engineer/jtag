@@ -25,7 +25,7 @@ class BCM_GPIO_REGS:
         self.__t = t
 
     def gpfsel_read(self, index):
-        return self.__t.mem_read32(GPFSEL + index * 4)
+        return self.__t.mem_read32(GPFSEL + index * 4)[0]
 
     def gpfsel_write(self, index, value):
         self.__t.mem_write32(GPFSEL + index * 4, value)
@@ -37,13 +37,13 @@ class BCM_GPIO_REGS:
         self.__t.mem_write32(GPCLR + index * 4, value)
 
     def gplev_read(self, index):
-        return self.__t.mem_read32(GPLEV + index * 4)
+        return self.__t.mem_read32(GPLEV + index * 4)[0]
 
     def gppud_write(self, value):
         self.__t.mem_write32(GPPUD, value)
 
     def gppud_read(self):
-        return self.__t.mem_read32(GPPUD)
+        return self.__t.mem_read32(GPPUD)[0]
 
     def gppudclk0_write(self, value):
         self.__t.mem_write32(GPPUDCLK0, value)

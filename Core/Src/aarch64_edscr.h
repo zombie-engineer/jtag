@@ -42,6 +42,10 @@
 #define EDSCR_STATUS_EXCEPT_CATCH         0b110111
 #define EDSCR_STATUS_HLT_STEP_NO_SYNDROME 0b111011
 
+#define EDECR_BIT_OSUCE 0
+#define EDECR_BIT_RCE   1
+#define EDECR_BIT_SS    2
+
 static inline int aarch64_edscr_get_status(uint32_t edscr)
 {
   return edscr & EDSCR_STATUS_MASK;

@@ -108,6 +108,8 @@ int aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
 
 int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
 
+int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr);
+
 void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
@@ -132,6 +134,8 @@ int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
   mem_access_size_t access_size, uint64_t addr, void *out_value);
 
 int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t value);
+int aarch64_write_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value);
 int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *out);

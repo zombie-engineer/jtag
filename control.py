@@ -10,6 +10,7 @@ import bcm_gpio
 import bcm_clock_manager
 import sdhc
 from elftools.elf.elffile import ELFFile
+import ctypes
 
 CMD6_CHECK_FUNCTION  = 0
 CMD6_SWITCH_FUNCTION = 1
@@ -161,7 +162,12 @@ class Target:
       last_lines = last_lines[:-1]
     if self.debug_tty_read:
       logging.debug(f'wait_cursor: last_lines: {last_lines}')
-    return last_lines
+
+    err = 0
+    if last_lines[-1].startswith('done'):
+      doneline = last_lines.pop()
+      err = int(doneline.split()[1])
+    return err, last_lines
 
   def to_cursor(self):
     self.write('')
@@ -175,8 +181,8 @@ class Target:
   def update_status(self):
     while True:
       self.write('status')
-      status = self.wait_cursor()
-      status = status[-1]
+      err, status_lines = self.wait_cursor()
+      status = status_lines[-1]
       if status.strip():
         break
 
@@ -190,8 +196,8 @@ class Target:
 
   def dump_regs(self):
     self.write('dumpregs')
-    lines = self.wait_cursor()
-    regs = lines[lines.index('dumpregs') + 1:lines.index('done')]
+    err, lines = self.wait_cursor()
+    regs = lines[lines.index('dumpregs') + 1 :]
     for regentry in regs:
       core, name, value = regentry.split(',')
       logging.info(f'core {core}, {name}: {value}')
@@ -202,7 +208,7 @@ class Target:
 
   def read_reg(self, regname):
     self.write(f'rr {regname}')
-    lines = self.wait_cursor()
+    err, lines = self.wait_cursor()
     return lines
 
   def resume(self):
@@ -220,28 +226,42 @@ class Target:
     self.wait_cursor()
     self.update_status()
 
-  def mem_read32(self, address):
-    self.write(f'mrw 0x{address:08x}')
-    lines = self.wait_cursor()
-    lines = lines[-1]
-    value = int(lines, base=0)
-    return value
+  def __mem_read(self, size, address, count):
+    countstr = ''
 
-  def mem_read64(self, address):
-    self.write(f'mrd 0x{address:08x} 1')
-    lines = self.wait_cursor()
-    lines = lines[-2]
-    value = int(lines, base=0)
-    return value
+    if count < 1 or count > 0xffff:
+      logging.error("invalid argument 'count': {count}")
+      return []
+    if size not in [32, 64]:
+      logging.error("invalid argument 'size': {size}")
+      return []
+
+    if count > 1:
+      countstr = f'/{count}'
+
+    cmd = f'r{size}{countstr} 0x{address:08x}'
+    self.write(cmd)
+    err, lines = self.wait_cursor()
+    if err:
+      print(f'Mem read cmd failed, err:{err}, details:{lines}')
+      return
+
+    if len(lines) and lines[0] == cmd:
+      lines.pop(0)
+
+    return [int(i, base=0) for i in lines]
+
+  def mem_read32(self, address, count=1):
+    return self.__mem_read(32, address, count)
+
+  def mem_read64(self, address, count=1):
+    return self.__mem_read(64, address, count)
 
   def mem_write32(self, address, value):
-    self.write(f'mww 0x{address:08x} 0x{value:08x}')
-    self.wait_cursor()
-
-  def mem_read(self, address, size):
-    self.write(f'mrd 0x{address:08x} {size}')
-    lines = self.wait_cursor()
-    logging.debug(lines)
+    self.write(f'w32 0x{address:08x} 0x{value:08x}')
+    err, lines = self.wait_cursor()
+    if err:
+      print('Failed to write', lines)
 
 
 def assert_state(is_acmd, cmd_idx, state):
@@ -283,7 +303,10 @@ class SD:
     self.__sdhc = sdhc
     self.__sdhost = sdhost
     self.__state = CARD_STATE_UNKNOWN
-    if use_sdhost:
+    self.__use_sdhost = use_sdhost
+
+  def init(self):
+    if self.__use_sdhost:
       self.__sdctrl = self.__sdhost
       self.__sdhc.stop()
       self.__sdhost.init_gpio()
@@ -443,14 +466,21 @@ class Soc:
       SDHCI(self.__t, logger),
       SDHOST(self.gpio, self.__t, logger), use_sdhost=True)
 
-  def read_mem32(self, address):
-    return self.__t.mem_read32(address)
+  def mem_read32(self, address):
+    return self.__t.mem_read32(address)[0]
 
-  def read_mem64(self, address):
-    print('read_mem64')
-    return self.__t.mem_read64(address)
+  def mem_read64(self, address):
+    return self.__t.mem_read64(address)[0]
 
-  def write_mem32(self, address, v):
+  def mem_read(self, address, size):
+    count = int(size / 8)
+    values64 = self.__t.mem_read64(address, count)
+    result = b''
+    for i in values64:
+      result += i.to_bytes(8, 'little')
+    return result
+
+  def mem_write32(self, address, v):
     self.__t.mem_write32(address, v)
 
   def reset(self):
@@ -592,7 +622,7 @@ def target_attach_and_halt(ttydev, baudrate):
     t.halt()
     status = t.get_status()
   t.dump_regs()
-  t.mem_read(0x80000, 24)
+  t.mem_read32(0x80000, 24)
 
   soc = Soc(t, logging)
   return soc
@@ -720,6 +750,55 @@ def action_sdhc(soc):
   read_sector(sd)
 
 
+class ListHead(ctypes.Structure):
+  _fields_ = [
+    ("next", ctypes.c_uint64),
+    ("prev", ctypes.c_uint64),
+  ]
+
+class Event(ctypes.Structure):
+    pass
+
+class Stack(ctypes.Structure):
+    pass
+
+class Task(ctypes.Structure):
+  _fields_ = [
+    ("scheduler_list", ListHead),
+    ("name", ctypes.c_char * 16),
+    ("task_id", ctypes.c_uint32),
+    ("cpuctx", ctypes.c_void_p),
+    ("next_wakeup_time", ctypes.c_uint64),
+    ("scheduler_request", ctypes.c_uint8),
+    ("wait_event", ctypes.POINTER(Event)),
+    ("stack", ctypes.POINTER(Stack)),
+  ]
+
+
+class Timer(ctypes.Structure):
+    pass  # unknown layout, just need a placeholder
+
+class Scheduler(ctypes.Structure):
+  _fields_ = [
+    ("current", ctypes.c_uint64),
+    ("runnable", ListHead),
+    ("blocked_on_event", ListHead),
+    ("blocked_on_timer", ListHead),
+    ("sched_timer", ctypes.POINTER(Timer)),
+    ("timer_interval_ms", ctypes.c_int),
+    ("idle_task", ctypes.POINTER(Task)),
+    ("ticks", ctypes.c_uint64),
+    ("needs_resched", ctypes.c_bool),
+  ]
+
+def bytes_to_scheduler(raw_bytes):
+  buf = (ctypes.c_char * len(raw_bytes)).from_buffer_copy(raw_bytes)
+  return ctypes.cast(ctypes.pointer(buf), ctypes.POINTER(Scheduler)).contents
+
+def bytes_to_task(raw_bytes):
+  buf = (ctypes.c_char * len(raw_bytes)).from_buffer_copy(raw_bytes)
+  return ctypes.cast(ctypes.pointer(buf), ctypes.POINTER(Task)).contents
+
 def do_main(ttydev, action, elf):
   soc = target_attach_and_halt(ttydev, 115200 * 8)
   if action == 'reset':
@@ -729,25 +808,32 @@ def do_main(ttydev, action, elf):
     logging.info('resuming')
     soc.resume()
   elif action == 'halt':
-    addr = get_symbol_address(elf, '__current_cpuctx')
-    v = soc.read_mem64(addr)
-    print(f'__current_cpuctx at 0x{addr:016x} = 0x{v:016x}')
-    addr = get_symbol_address(elf, 'sched')
-    v = soc.read_mem64(addr)
-    print(f'sched at 0x{addr:08x} = 0x{v:016x}')
-    v = soc.read_mem64(addr + 8)
-    print(f'sched at 0x{addr+8:08x} = 0x{v:016x}')
     pass
   elif action.startswith('r32'):
     addr = int(action[3:], 0)
-    v = soc.read_mem32(addr)
-    print(f'read_mem32 result: 0x{addr:08x}: 0x{v:08x}')
+    v = soc.mem_read32(addr)
+    print(f'mem_read32 result: 0x{addr:08x}: 0x{v:08x}')
   elif action.startswith('r64'):
     addr = int(action[3:], 0)
-    v = soc.read_mem64(addr)
-    print(f'read_mem64 result: 0x{addr:08x}: 0x{v:08x}')
-  else:
+    v = soc.mem_read64(addr)
+    print(f'mem_read64 result: 0x{addr:08x}: 0x{v:08x}')
+  elif action == 'initsd':
     action_sdhc(soc)
+  elif action == 'script':
+    addr = get_symbol_address(elf, '__current_cpuctx')
+    v = soc.mem_read64(addr)
+    print(f'__current_cpuctx at 0x{addr:016x} = 0x{v:016x}')
+    sched_addr = get_symbol_address(elf, 'sched')
+    rawbytes = soc.mem_read(sched_addr, ctypes.sizeof(Scheduler))
+    sched = bytes_to_scheduler(rawbytes)
+    print(f'scheduler:0x{sched_addr:016x}')
+    print(f'scheduler.current:0x{sched.current:016x}')
+    print(f'runlist:next=0x{sched.runnable.next:016x},prev=0x{sched.runnable.prev:016x}')
+    rawbytes = soc.mem_read(sched.current, ctypes.sizeof(Task))
+    print(f'task at 0x{sched.current:016x}, size={len(rawbytes)}')
+    task = bytes_to_task(rawbytes)
+    task_name = task.name.decode('utf-8')
+    print(f'task:{task.task_id}, name:{task_name}, cpuctx:0x{task.cpuctx:016x}')
   sys.exit(0)
 
 

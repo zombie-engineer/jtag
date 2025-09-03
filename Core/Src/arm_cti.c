@@ -51,3 +51,12 @@ void cti_ack(struct adiv5_dap *d, uint32_t cti_base)
   adiv5_mem_ap_write_word(d, cti_base + CTIAPPPULSE, 1<<1);
   adiv5_mem_ap_read_word(d, cti_base + CTITRIGOUTSTATUS, &reg);
 }
+
+void cti_ack2(struct adiv5_dap *d, uint32_t cti_base, uint32_t event)
+{
+  uint32_t reg;
+  adiv5_mem_ap_write_word(d, cti_base + CTIINTACK, 1<<event);
+  do {
+    adiv5_mem_ap_read_word(d, cti_base + CTITRIGOUTSTATUS, &reg);
+  } while (reg & (1 << event));
+}

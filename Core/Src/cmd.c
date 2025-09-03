@@ -241,6 +241,10 @@ bool cmdbuf_parse(struct cmd *c, const char *buf, const char *end)
     c->cmd = CMD_TARGET_RESUME;
     return true;
   }
+  else if (p[0] == 's' && p[1] == 0) {
+    c->cmd = CMD_TARGET_STEP;
+    return true;
+  }
   else if (!strncmp(p, "srst", 4)) {
     c->cmd = CMD_TARGET_SOFT_RESET;
     return true;

@@ -38,6 +38,24 @@ int target_core_resume(struct target_core *c)
   return ret;
 }
 
+int target_core_step(struct target_core *c)
+{
+  int ret;
+
+  if (!c->halted)
+    return -EINVAL;
+
+  ret = aarch64_restore_before_resume(&c->a64, c->debug);
+  if (ret)
+    return ret;
+
+  ret = aarch64_step(&c->a64, c->debug, c->cti);
+  if (!ret)
+    ret = aarch64_fetch_context(&c->a64, c->debug);
+
+  return ret;
+}
+
 int target_halt(struct target *t)
 {
   return target_core_halt(&t->core[0]);
@@ -51,6 +69,11 @@ bool target_is_halted(const struct target *t)
 int target_resume(struct target *t)
 {
   return target_core_resume(&t->core[0]);
+}
+
+int target_step(struct target *t)
+{
+  return target_core_step(&t->core[0]);
 }
 
 static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)
@@ -200,7 +223,7 @@ int target_core_reg_write64(struct target_core *c, uint32_t reg_id,
   if (!c->halted)
     return -EPIPE;
 
-  return aarch64_write_core_reg(&c->a64, c->debug, reg_id, value);
+  return aarch64_write_cached_reg(&c->a64, c->debug, reg_id, value);
 }
 
 int target_core_reg_read64(struct target_core *c, uint32_t reg_id,
@@ -209,7 +232,7 @@ int target_core_reg_read64(struct target_core *c, uint32_t reg_id,
   if (!c->halted)
     return -EPIPE;
 
-  return aarch64_read_core_reg(&c->a64, c->debug, reg_id, out);
+  return aarch64_read_cached_reg(&c->a64, c->debug, reg_id, out);
 }
 
 int raspberrypi_soft_reset(struct target *t)

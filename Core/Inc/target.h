@@ -28,6 +28,7 @@ struct target {
 int target_halt(struct target *d);
 bool target_is_halted(const struct target *t);
 int target_resume(struct target *d);
+int target_step(struct target *d);
 int target_init(struct target *t);
 int target_soft_reset(struct target *t);
 

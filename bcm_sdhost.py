@@ -56,85 +56,85 @@ class SDHOST_REGS:
     self.__t = t
 
   def cmd_read(self):
-    return self.__t.mem_read32(SDHOST_CMD)
+    return self.__t.mem_read32(SDHOST_CMD)[0]
 
   def cmd_write(self, v):
     return self.__t.mem_write32(SDHOST_CMD, v)
 
   def arg_read(self):
-    return self.__t.mem_read32(SDHOST_ARG)
+    return self.__t.mem_read32(SDHOST_ARG)[0]
 
   def arg_write(self, v):
     return self.__t.mem_write32(SDHOST_ARG, v)
 
   def tout_read(self):
-    return self.__t.mem_read32(SDHOST_TOUT)
+    return self.__t.mem_read32(SDHOST_TOUT)[0]
 
   def tout_write(self, v):
     return self.__t.mem_write32(SDHOST_TOUT, v)
 
   def cdiv_read(self):
-    return self.__t.mem_read32(SDHOST_CDIV)
+    return self.__t.mem_read32(SDHOST_CDIV)[0]
 
   def cdiv_write(self, v):
     return self.__t.mem_write32(SDHOST_CDIV, v)
 
   def resp0_read(self):
-    return self.__t.mem_read32(SDHOST_RESP0)
+    return self.__t.mem_read32(SDHOST_RESP0)[0]
 
   def resp1_read(self):
-    return self.__t.mem_read32(SDHOST_RESP1)
+    return self.__t.mem_read32(SDHOST_RESP1)[0]
 
   def resp2_read(self):
-    return self.__t.mem_read32(SDHOST_RESP2)
+    return self.__t.mem_read32(SDHOST_RESP2)[0]
 
   def resp3_read(self):
-    return self.__t.mem_read32(SDHOST_RESP3)
+    return self.__t.mem_read32(SDHOST_RESP3)[0]
 
   def hsts_read(self):
-    return self.__t.mem_read32(SDHOST_HSTS)
+    return self.__t.mem_read32(SDHOST_HSTS)[0]
 
   def hsts_write(self, v):
     return self.__t.mem_write32(SDHOST_HSTS, v)
 
   def cnt_read(self):
-    return self.__t.mem_read32(SDHOST_CNT)
+    return self.__t.mem_read32(SDHOST_CNT)[0]
 
   def cnt_write(self, v):
     return self.__t.mem_write32(SDHOST_CNT, v)
 
   def vdd_read(self):
-    return self.__t.mem_read32(SDHOST_VDD)
+    return self.__t.mem_read32(SDHOST_VDD)[0]
 
   def vdd_write(self, v):
     return self.__t.mem_write32(SDHOST_VDD, v)
 
   def edm_read(self):
-    return self.__t.mem_read32(SDHOST_EDM)
+    return self.__t.mem_read32(SDHOST_EDM)[0]
 
   def edm_write(self, v):
     return self.__t.mem_write32(SDHOST_EDM, v)
 
   def hcfg_read(self):
-    return self.__t.mem_read32(SDHOST_HCFG)
+    return self.__t.mem_read32(SDHOST_HCFG)[0]
 
   def hcfg_write(self, v):
     return self.__t.mem_write32(SDHOST_HCFG, v)
 
   def hbct_read(self):
-    return self.__t.mem_read32(SDHOST_HBCT)
+    return self.__t.mem_read32(SDHOST_HBCT)[0]
 
   def hbct_write(self, v):
     return self.__t.mem_write32(SDHOST_HBCT, v)
 
   def data_read(self):
-    return self.__t.mem_read32(SDHOST_DATA)
+    return self.__t.mem_read32(SDHOST_DATA)[0]
 
   def data_write(self, v):
     return self.__t.mem_write32(SDHOST_DATA, v)
 
   def hblc_read(self):
-    return self.__t.mem_read32(SDHOST_HBLC)
+    return self.__t.mem_read32(SDHOST_HBLC)[0]
 
   def hblc_write(self, v):
     return self.__t.mem_write32(SDHOST_HBLC, v)
