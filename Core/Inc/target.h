@@ -29,6 +29,8 @@ int target_halt(struct target *d);
 bool target_is_halted(const struct target *t);
 int target_resume(struct target *d);
 int target_step(struct target *d);
+int target_breakpoint(struct target *d, bool remove, bool hardware,
+  uint64_t arg);
 int target_init(struct target *t);
 int target_soft_reset(struct target *t);
 

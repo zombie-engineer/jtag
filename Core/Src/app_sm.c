@@ -624,6 +624,17 @@ static int app_process_reg_access(struct target *t, struct cmd *c)
   return ret;
 }
 
+static int app_process_breakpoint(struct target *t, struct cmd *c)
+{
+  int ret;
+  const uint64_t value = (((uint64_t)(c->arg1)) << 32) | c->arg0;
+  const bool hardware = c->arg2;
+  const bool remove = c->arg3;
+
+  CHECK_ATTACHED();
+  return target_breakpoint(t, remove, hardware, value);
+}
+
 static int app_process_dump_regs(struct target *t)
 {
   int i, j;
@@ -741,6 +752,9 @@ void app_sm_process_next_cmd(void)
       break;
     case CMD_TARGET_REG_ACCESS:
       ret = app_process_reg_access(&t, &cmd);
+      break;
+    case CMD_TARGET_BREAKPOINT:
+      ret = app_process_breakpoint(&t, &cmd);
       break;
     case CMD_TARGET_DUMP_REGS:
       ret = app_process_dump_regs(&t);

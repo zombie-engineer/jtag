@@ -102,6 +102,10 @@ struct testcase cases[] = {
   T(" rw x0 0   ", REG_ACCESS, AARCH64_CORE_REG_X0, 0, 0, 0, 0, 8, true),
   T(" rw x30      0  ", REG_ACCESS, AARCH64_CORE_REG_X30, 0, 0, 0, 0, 8, true),
   T(" rw pc    0     ", REG_ACCESS, AARCH64_CORE_REG_PC, 0, 0, 0, 0, 8, true),
+  T("bps 0xffff000000112233", BREAKPOINT, 0x00112233, 0xffff0000, 0, 0, 0, 8, false),
+  T("bpsd 1", BREAKPOINT, 1, 0, 0, 1, 0, 8, false),
+  T("bph 0xffff000000112233", BREAKPOINT, 0x00112233, 0xffff0000, 1, 0, 0, 8, false),
+  T("bphd 1", BREAKPOINT, 1, 0, 1, 1, 0, 8, false),
 };
 
 int main()

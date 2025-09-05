@@ -4,16 +4,17 @@
 #include <io_api.h>
 
 typedef enum {
-  CMD_NONE                = 0,
-  CMD_TARGET_STATUS       = 1,
-  CMD_TARGET_INIT         = 2,
-  CMD_TARGET_HALT         = 3,
-  CMD_TARGET_RESUME       = 4,
-  CMD_TARGET_STEP         = 5,
-  CMD_TARGET_SOFT_RESET   = 6,
-  CMD_TARGET_MEM_ACCESS   = 7,
-  CMD_TARGET_REG_ACCESS   = 8,
-  CMD_TARGET_DUMP_REGS    = 12,
+  CMD_NONE              = 0,
+  CMD_TARGET_STATUS     = 1,
+  CMD_TARGET_INIT       = 2,
+  CMD_TARGET_HALT       = 3,
+  CMD_TARGET_RESUME     = 4,
+  CMD_TARGET_STEP       = 5,
+  CMD_TARGET_SOFT_RESET = 6,
+  CMD_TARGET_MEM_ACCESS = 7,
+  CMD_TARGET_REG_ACCESS = 8,
+  CMD_TARGET_BREAKPOINT = 9,
+  CMD_TARGET_DUMP_REGS  = 13,
   CMD_UNKNOWN
 } cmd_t;
 

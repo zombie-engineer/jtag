@@ -110,6 +110,9 @@ int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
 
 int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr);
 
+int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
+  bool hardware, uint64_t arg);
+
 void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 

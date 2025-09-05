@@ -56,6 +56,14 @@ int target_core_step(struct target_core *c)
   return ret;
 }
 
+int target_core_breakpoint(struct target_core *c, bool remove, bool hardware,
+  uint64_t arg)
+{
+  if (!c->halted)
+    return -EINVAL;
+  return aarch64_breakpoint(&c->a64, c->debug, remove, hardware, arg);
+}
+
 int target_halt(struct target *t)
 {
   return target_core_halt(&t->core[0]);
@@ -74,6 +82,12 @@ int target_resume(struct target *t)
 int target_step(struct target *t)
 {
   return target_core_step(&t->core[0]);
+}
+
+int target_breakpoint(struct target *t, bool remove, bool hardware,
+  uint64_t arg)
+{
+  return target_core_breakpoint(&t->core[0], remove, hardware, arg);
 }
 
 static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)

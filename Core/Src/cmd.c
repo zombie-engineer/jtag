@@ -74,6 +74,65 @@ out:
   return reg_id;
 }
 
+static inline bool cmdline_parse_breakpoint(const char *l, const char *end,
+  struct cmd *c)
+{
+  const char *old_l;
+  uint64_t value;
+
+  bool remove;
+  bool hardware;
+
+  /*
+   * Syntax:
+   * bps  ADDRESS       - add software breakpoint
+   * bpsd BREAKPOINT ID - delete software breakpoint 
+   * bph  ADDRESS       - add hardware breakpoint
+   * bphd BREAKPOINT ID - delete hardware breakpoint 
+   */
+
+  SKIP_SPACES(l, end);
+
+  /* bps 0 - minimal size is 5 */
+  if (end - l < 5)
+    return false;
+
+  if (!CHRCMP2(l, 'b', 'p'))
+    return false;
+
+  l += 2;
+  if (*l == 's')
+    hardware = false;
+  else if (*l == 'h')
+    hardware = true;
+  else
+    return false;
+
+  l++;
+  if (*l == 'd') {
+    remove = true;
+    l++;
+  }
+  else
+    remove = false;
+
+  SKIP_SPACES(l, end);
+  if (l == end)
+    return false;
+
+  old_l = l;
+  value = strtoull(l, (char **)&l, 0);
+  if (l == old_l)
+    return false;
+
+  c->cmd = CMD_TARGET_BREAKPOINT;
+  c->arg0 = value & 0xffffffff;
+  c->arg1 = (value >> 32) & 0xffffffff;
+  c->arg2 = hardware;
+  c->arg3 = remove;
+  return true;
+}
+
 static inline bool cmdline_parse_read_write_cmd(const char *l,
   const char *end, struct cmd *c)
 {
@@ -245,6 +304,8 @@ bool cmdbuf_parse(struct cmd *c, const char *buf, const char *end)
     c->cmd = CMD_TARGET_STEP;
     return true;
   }
+  else if (cmdline_parse_breakpoint(buf, end, c))
+    return true;
   else if (!strncmp(p, "srst", 4)) {
     c->cmd = CMD_TARGET_SOFT_RESET;
     return true;

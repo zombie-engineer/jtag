@@ -274,8 +274,11 @@ int aarch64_resume(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
 
 int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
 {
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDESR, &a->regs.edesr);
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDESR,
+    &a->regs.edesr);
+
   if (!aarch64_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDECR,
     &a->regs.edecr, 1<<EDECR_BIT_SS, 1<<EDECR_BIT_SS))
     return -EIO;
@@ -284,9 +287,12 @@ int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
     &a->regs.edscr, 3<<EDSCR_INTdis, 3<<EDSCR_INTdis))
     return -EIO;
 
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDESR, &a->regs.edesr);
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR, &a->regs.edprsr);
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDESR,
+    &a->regs.edesr);
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR,
+    &a->regs.edprsr);
 
   /* RESUME */
   cti_ack2(a->dap, cti_baseaddr, CTI_EVENT_HALT);
@@ -298,8 +304,11 @@ int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
     adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR,
       &a->regs.edprsr);
 
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDESR, &a->regs.edesr);
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR, &a->regs.edscr);
+    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDESR,
+      &a->regs.edesr);
+
+    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+      &a->regs.edscr);
   } while (!aarch64_edprsr_is_halted(a->regs.edprsr));
 
   if (!aarch64_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
@@ -310,6 +319,30 @@ int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
     &a->regs.edecr, 1<<EDECR_BIT_SS, 0))
     return -EIO;
 
+  return 0;
+}
+
+int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
+  bool hardware, uint64_t arg)
+{
+  if (hardware) {
+    uint32_t ctrl;
+    if (remove) {
+    }
+    else {
+      ctrl = 1;
+      uint32_t addr_lo = arg & 0xffffffff;
+      uint32_t addr_hi = (arg >> 32) & 0xffffffff;
+
+      adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBVR0_EL1,
+        addr_lo);
+      adiv5_mem_ap_write_word_e(a->dap,
+        baseaddr + DBG_REG_ADDR_DBGBVR0_EL1 + 4, addr_hi);
+
+      adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBCR0_EL1,
+        ctrl);
+    }
+  }
   return 0;
 }
 
@@ -659,7 +692,8 @@ int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   return aarch64_check_handle_sticky_error(a, baseaddr);
 }
 
-int aarch64_exec(struct aarch64 *a, uint32_t baseaddr, const uint32_t *const instr, int num)
+int aarch64_exec(struct aarch64 *a, uint32_t baseaddr,
+  const uint32_t *const instr, int num)
 {
   if (!aarch64_set_normal_mode(a, baseaddr))
     return -EIO;
