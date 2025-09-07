@@ -178,6 +178,11 @@ class Target:
     self.wait_cursor()
     self.update_status()
 
+  def check_is_halted(self):
+    self.write('?halted')
+    err, lines = self.wait_cursor()
+    return err == 0
+
   def update_status(self):
     while True:
       self.write('status')
@@ -195,16 +200,21 @@ class Target:
     return self.__status
 
   def dump_regs(self):
+    response = {}
     self.write('dumpregs')
     err, lines = self.wait_cursor()
     regs = lines[lines.index('dumpregs') + 1 :]
     for regentry in regs:
       core, name, value = regentry.split(',')
+      name = name.strip()
+      response.setdefault(int(core), {})[name] = int(value, 0)
       logging.info(f'core {core}, {name}: {value}')
+    return response
 
   def write_reg(self, regname, value):
     self.write(f'rw {regname} {value}')
-    self.wait_cursor()
+    err, lines = self.wait_cursor()
+    return err == 0
 
   def read_reg(self, regname):
     self.write(f'rr {regname}')
@@ -215,6 +225,10 @@ class Target:
     self.write('resume')
     self.wait_cursor()
     self.update_status()
+
+  def step(self):
+    self.write('s')
+    self.wait_cursor()
 
   def halt(self):
     self.write('halt')
@@ -473,12 +487,22 @@ class Soc:
     return self.__t.mem_read64(address)[0]
 
   def mem_read(self, address, size):
-    count = int(size / 8)
-    values64 = self.__t.mem_read64(address, count)
-    result = b''
-    for i in values64:
-      result += i.to_bytes(8, 'little')
-    return result
+    word_size = 8
+    if size == 0:
+      return b''
+
+    print(f'target mem_read {address}, {size}')
+    count = max(int(size / word_size), 1)
+    extra_bytes = count * word_size - size 
+    if word_size == 4:
+      values = self.__t.mem_read32(address, count)
+    elif word_size == 8:
+      values = self.__t.mem_read64(address, count)
+
+    result = bytearray()
+    for i in values:
+      result.extend(i.to_bytes(word_size, 'little'))
+    return result[:-extra_bytes]
 
   def mem_write32(self, address, v):
     self.__t.mem_write32(address, v)

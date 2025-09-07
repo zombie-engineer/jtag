@@ -41,7 +41,8 @@
 #define AARCH64_CORE_REG_ESR_EL2   34
 #define AARCH64_CORE_REG_FAR_EL2   35
 #define AARCH64_CORE_REG_DISR_EL1  36
-#define AARCH64_CORE_REGS_COUNT    37
+#define AARCH64_CORE_REG_DSPSR_EL0 37
+#define AARCH64_CORE_REGS_COUNT    38
 #define AARCH64_CORE_REG_UNKNOWN 0xffff
 
 
@@ -54,7 +55,7 @@ struct aarch64_context {
   uint64_t sctlr_el1;
   uint64_t dirty_mask;
   int el;
-  int pstate;
+  uint64_t pstate;
   bool mmu_on;
 };
 
@@ -103,6 +104,8 @@ bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr);
 int aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
+int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr);
+
 int aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
@@ -138,6 +141,8 @@ int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
 
 int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value);
+int aarch64_read_cached_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t *value);
 int aarch64_write_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value);
 int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,

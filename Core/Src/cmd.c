@@ -296,6 +296,10 @@ bool cmdbuf_parse(struct cmd *c, const char *buf, const char *end)
     c->cmd = CMD_TARGET_HALT;
     return true;
   }
+  else if (!strncmp(p, "?halted", 7)) {
+    c->cmd = CMD_TARGET_RUNNING_CHECK_HALTED;
+    return true;
+  }
   else if (!strncmp(p, "resume", 6)) {
     c->cmd = CMD_TARGET_RESUME;
     return true;

@@ -20,6 +20,16 @@ int target_core_halt(struct target_core *c)
   return aarch64_fetch_context(&c->a64, c->debug);
 }
 
+int target_core_check_halted(struct target_core *c)
+{
+  int ret = aarch64_check_halted(&c->a64, c->debug);
+  if (ret)
+    return ret;
+
+  c->halted = true;
+  return aarch64_fetch_context(&c->a64, c->debug);
+}
+
 int target_core_resume(struct target_core *c)
 {
   int ret;
@@ -67,6 +77,11 @@ int target_core_breakpoint(struct target_core *c, bool remove, bool hardware,
 int target_halt(struct target *t)
 {
   return target_core_halt(&t->core[0]);
+}
+
+int target_check_halted(struct target *t)
+{
+  return target_core_check_halted(&t->core[0]);
 }
 
 bool target_is_halted(const struct target *t)

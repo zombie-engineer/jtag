@@ -147,6 +147,21 @@ static inline int aarch64_check_handle_sticky_error(struct aarch64 *a,
   return 0;
 }
 
+int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr)
+{
+  int ret = -EAGAIN;
+  int ret2;
+
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR,
+    &a->regs.edprsr);
+
+  if (aarch64_edprsr_is_halted(a->regs.edprsr))
+    ret = 0;
+
+  ret2 = aarch64_check_handle_sticky_error(a, baseaddr);
+  return ret2 ? ret2 : ret;
+}
+
 int aarch64_halt(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
 {
   if (!aarch64_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
@@ -168,7 +183,7 @@ int aarch64_halt(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
 static inline bool aarch64_ctx_get_reg(struct aarch64_context *ctx,
   uint32_t reg_id, uint64_t *out)
 {
-  if (reg_id < AARCH64_CORE_REG_X30) {
+  if (reg_id <= AARCH64_CORE_REG_X30) {
     *out = ctx->x0_30[reg_id];
     return true;
   }
@@ -187,7 +202,7 @@ static inline bool aarch64_ctx_get_reg(struct aarch64_context *ctx,
 static inline bool aarch64_ctx_set_reg(struct aarch64_context *ctx,
   uint32_t reg_id, uint64_t value)
 {
-  if (reg_id < AARCH64_CORE_REG_X30) {
+  if (reg_id <= AARCH64_CORE_REG_X30) {
     ctx->x0_30[reg_id] = value;
     goto dirty;
   }
@@ -372,6 +387,7 @@ int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
     instructions[0] = 0x910003e0;
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
     a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   }
   else if (reg == AARCH64_CORE_REG_SCTLR_EL1) {
@@ -379,6 +395,7 @@ int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
     instructions[0] = 0xd5381000;
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
     a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   }
   else if (reg == AARCH64_CORE_REG_ESR_EL2) {
@@ -386,6 +403,7 @@ int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
     instructions[0] = 0xd53c5200;
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
     a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   }
   else if (reg == AARCH64_CORE_REG_FAR_EL2) {
@@ -393,6 +411,7 @@ int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
     instructions[0] = 0xd53c6000;
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
     a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   }
   else if (reg == AARCH64_CORE_REG_DISR_EL1) {
@@ -400,6 +419,13 @@ int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
     instructions[0] = 0xd538c120;
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
+    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
+  }
+  else if (reg == AARCH64_CORE_REG_DSPSR_EL0) {
+    instructions[0] = 0xd53b4500;
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
     a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   }
   else
@@ -512,6 +538,12 @@ int aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
 
   c->sctlr_el1 = reg;
   c->mmu_on = reg & 1;
+
+  ret = aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_DSPSR_EL0,
+    &c->pstate);
+  if (ret)
+    return ret;
+
   return 0;
 }
 

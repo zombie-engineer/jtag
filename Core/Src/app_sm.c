@@ -626,7 +626,6 @@ static int app_process_reg_access(struct target *t, struct cmd *c)
 
 static int app_process_breakpoint(struct target *t, struct cmd *c)
 {
-  int ret;
   const uint64_t value = (((uint64_t)(c->arg1)) << 32) | c->arg0;
   const bool hardware = c->arg2;
   const bool remove = c->arg3;
@@ -654,6 +653,7 @@ static int app_process_dump_regs(struct target *t)
 
     msg("%d, sp," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->sp));
     msg("%d, pc," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->pc));
+    msg("%d, pstate, 0x%016x\r\n", i, (uint32_t)core_ctx->pstate);
   }
 
   return 0;
@@ -727,6 +727,17 @@ void app_sm_process_next_cmd(void)
       }
       else
         ret = target_halt(&t);
+      break;
+    case CMD_TARGET_RUNNING_CHECK_HALTED:
+      if (!t.attached) {
+        msg("not attached\r\n");
+        ret = -EINVAL;
+      }
+      else if (target_is_halted(&t))
+        ret = 0;
+      else {
+        ret = target_check_halted(&t);
+      }
       break;
     case CMD_TARGET_RESUME:
       if (target_is_halted(&t))
