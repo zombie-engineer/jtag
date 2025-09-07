@@ -20,6 +20,15 @@ int target_core_halt(struct target_core *c)
   return aarch64_fetch_context(&c->a64, c->debug);
 }
 
+static int target_core_exec(struct target_core *c, const uint32_t *const instr,
+  int count)
+{
+  if (!c->halted)
+    return -EPIPE;
+
+  return aarch64_exec(&c->a64, c->debug, instr, count);
+}
+
 int target_core_check_halted(struct target_core *c)
 {
   int ret = aarch64_check_halted(&c->a64, c->debug);
@@ -77,6 +86,11 @@ int target_core_breakpoint(struct target_core *c, bool remove, bool hardware,
 int target_halt(struct target *t)
 {
   return target_core_halt(&t->core[0]);
+}
+
+int target_exec(struct target *t, const uint32_t *instr, int count)
+{
+  return target_core_exec(&t->core[0], instr, count);
 }
 
 int target_check_halted(struct target *t)
@@ -156,15 +170,6 @@ static bool target_parse_rom(struct target *t)
     arm_cmsis_mem_ap_examine(t, mem_addr);
   }
   return true;
-}
-
-int target_core_exec(struct target_core *c, const uint32_t * const instr,
-  int num)
-{
-  if (!c->halted)
-    return -EPIPE;
-
-  return aarch64_exec(&c->a64, c->debug, instr, num);
 }
 
 static int target_core_mem_read(struct target_core *c,
@@ -247,19 +252,30 @@ static int target_core_mem_write(struct target_core *c,
 }
 
 int target_core_reg_write64(struct target_core *c, uint32_t reg_id,
-  uint64_t value)
+  uint64_t value, bool sync)
 {
+  int ret;
+
   if (!c->halted)
     return -EPIPE;
 
-  return aarch64_write_cached_reg(&c->a64, c->debug, reg_id, value);
+  ret = aarch64_write_cached_reg(&c->a64, c->debug, reg_id, value);
+  if (ret)
+    return ret;
+
+  if (sync)
+    ret = aarch64_restore_reg(&c->a64, c->debug, reg_id);
+  return ret;
 }
 
 int target_core_reg_read64(struct target_core *c, uint32_t reg_id,
-  uint64_t *out)
+  uint64_t *out, bool direct)
 {
   if (!c->halted)
     return -EPIPE;
+
+  if (direct)
+    return aarch64_read_core_reg(&c->a64, c->debug, reg_id, out);
 
   return aarch64_read_cached_reg(&c->a64, c->debug, reg_id, out);
 }
@@ -343,14 +359,16 @@ int target_mem_write(struct target *t, mem_access_size_t access_size,
   return target_core_mem_write(&t->core[0], access_size, addr, value);
 }
 
-int target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value)
+int target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value,
+  bool sync)
 {
-  return target_core_reg_write64(&t->core[0], reg_id, value);
+  return target_core_reg_write64(&t->core[0], reg_id, value, sync);
 }
 
-int target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out)
+int target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out,
+  bool direct)
 {
-  return target_core_reg_read64(&t->core[0], reg_id, out);
+  return target_core_reg_read64(&t->core[0], reg_id, out, direct);
 }
 
 int target_mem_read_fast_start(struct target *t, uint64_t addr)

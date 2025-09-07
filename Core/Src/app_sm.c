@@ -608,20 +608,30 @@ static int app_process_mem_access(struct target *t, struct cmd *c)
 static int app_process_reg_access(struct target *t, struct cmd *c)
 {
   int ret;
+  bool direct;
+  bool sync;
 
   uint64_t value;
 
   CHECK_ATTACHED();
 
   if (c->is_write) {
+    sync = (bool)c->arg3;
     value = (((uint64_t)(c->arg2)) << 32) | c->arg1;
-    ret = target_reg_write_64(t, c->arg0, value);
+    ret = target_reg_write_64(t, c->arg0, value, sync);
   } else {
-    ret = target_reg_read_64(t, c->arg0, &value);
+    direct = (bool)c->arg3;
+    ret = target_reg_read_64(t, c->arg0, &value, direct);
     if (!ret)
       print_value(value, MEM_ACCESS_SIZE_64);
   }
   return ret;
+}
+
+static int app_process_exec(struct target *t, struct cmd *c)
+{
+  CHECK_ATTACHED();
+  return target_exec(t, &c->arg0, 1);
 }
 
 static int app_process_breakpoint(struct target *t, struct cmd *c)
@@ -769,6 +779,9 @@ void app_sm_process_next_cmd(void)
       break;
     case CMD_TARGET_DUMP_REGS:
       ret = app_process_dump_regs(&t);
+      break;
+    case CMD_TARGET_EXEC:
+      ret = app_process_exec(&t, &cmd);
       break;
     default:
       ret = -EINVAL;

@@ -149,6 +149,7 @@ static inline bool cmdline_parse_read_write_cmd(const char *l,
   int reg_id;
   const char *old_l;
   bool is_write;
+  bool sync;
   uint64_t addr;
   uint64_t value;
   int count;
@@ -160,10 +161,12 @@ static inline bool cmdline_parse_read_write_cmd(const char *l,
   if (end - l < 4)
     return false;
 
-  if (CHRCMP3(l, 'r', 'r', ' ') || CHRCMP3(l, 'r', 'w', ' ')) {
+  if (CHRCMP3(l, 'r', 'r', ' ') || CHRCMP3(l, 'r', 'w', ' ')
+    || CHRCMP3(l, 'r', 'R', ' ') || CHRCMP3(l, 'r', 'W', ' ')) {
     /* Register read / write */
 
-    is_write = l[1] == 'w';
+    is_write = l[1] == 'w' || l[1] == 'W';
+    sync = l[1] == 'W' || l[1] == 'R';
     l += 3;
     reg_id = parse_reg_name(is_write, &l, end);
     if (reg_id == AARCH64_CORE_REG_UNKNOWN)
@@ -185,6 +188,7 @@ static inline bool cmdline_parse_read_write_cmd(const char *l,
 
     c->cmd = CMD_TARGET_REG_ACCESS;
     c->arg0 = reg_id;
+    c->arg3 = sync;
 
     if (is_write) {
       c->arg1 = value & 0xffffffff;
@@ -266,6 +270,41 @@ parse_count:
   return true;
 }
 
+static inline bool cmdline_parse_exec_cmd(const char *l,
+  const char *end, struct cmd *c)
+{
+  /* ex 0x11223344 */
+  const char *old_l;
+  uint64_t instruction;
+
+  SKIP_SPACES(l, end);
+
+  /* smallest line is 10 instr chars + 'ex' + ' ' */
+  if (end - l < 13)
+    return false;
+
+  /* Should be mem read or write */
+  if (!CHRCMP3(l, 'e', 'x', ' '))
+    return false;
+
+  l += 2;
+  SKIP_SPACES(l, end);
+
+  /* 4 byte instruction in form 0x11223344 */
+  if (end - l != 10)
+    return false;
+
+  SKIP_SPACES(l, end);
+  old_l = l;
+  instruction = strtoull(l, (char **)&l, 0);
+  if (l == old_l)
+    return false;
+
+  c->arg0 = instruction;
+  c->cmd = CMD_TARGET_EXEC;
+  return true;
+}
+
 bool cmdbuf_parse(struct cmd *c, const char *buf, const char *end)
 {
   const char *p = buf;
@@ -315,6 +354,8 @@ bool cmdbuf_parse(struct cmd *c, const char *buf, const char *end)
     return true;
   }
   else if (cmdline_parse_read_write_cmd(buf, end, c))
+    return true;
+  else if (cmdline_parse_exec_cmd(buf, end, c))
     return true;
 
   return false;

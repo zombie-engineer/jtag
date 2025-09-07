@@ -109,6 +109,7 @@ int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr);
 int aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
+int aarch64_restore_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg_id);
 int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
 
 int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr);
