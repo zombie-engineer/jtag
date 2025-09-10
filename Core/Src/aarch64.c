@@ -348,6 +348,31 @@ int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
   return 0;
 }
 
+static int aarch64_get_cache_info(struct aarch64 *a, uint32_t baseaddr)
+{
+  int ret;
+  uint64_t ctr_el0, clidr_el1, csselr_el1;
+
+  ret = aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_CTR_EL0, &ctr_el0);
+  if (ret)
+    return ret;
+
+  a->cache_line_width_inst = 4ul << (ctr_el0 & 0xf);
+  a->cache_line_width_data = 4ul << ((ctr_el0 >> 16) & 0xf);
+
+  ret = aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_CLIDR_EL1,
+    &clidr_el1);
+  if (ret)
+    return ret;
+
+  ret = aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_CSSELR_EL1,
+    &csselr_el1);
+  if (ret)
+    return ret;
+
+  return 0;
+}
+
 static int aarch64_breakpoint_sw(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, bool remove)
 {
@@ -610,6 +635,7 @@ int aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
   if (ret)
     return ret;
 
+  ret = aarch64_get_cache_info(a, baseaddr);
   return 0;
 }
 
