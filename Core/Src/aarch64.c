@@ -34,6 +34,9 @@
 #define DBGDTR_EL0 MRSMSR_SYSREG(0b10, 0b011,      0, 0b0100,     0)
 #define DLR_EL0    MRSMSR_SYSREG(0b11, 0b011, 0b0100, 0b0101, 0b001)
 #define X0         0
+#define CTR_EL0    MRSMSR_SYSREG(0b11, 0b011, 0b0000, 0b0000, 0b001)
+#define CLIDR_EL1  MRSMSR_SYSREG(0b11, 0b001, 0b0000, 0b0000, 0b001)
+#define CSSELR_EL1 MRSMSR_SYSREG(0b11, 0b010, 0b0000, 0b0000, 0b000)
 
 #define AARCH64_I_MSR(__dstreg, __srcreg) \
   (0xd5100000 | __dstreg | (__srcreg & 0x1f))
@@ -43,10 +46,13 @@
 
 /* 0xb8404401 */
 #define AARCH64_LDR_POSTINC_32(__addrreg, __dstreg) \
-  (0xb8400400 | ((4 & 0x1ff) << 12) | (__addrreg << 5)| __dstreg)
+  (0xb8400400 | ((4 & 0x1ff) << 12) | (__addrreg << 5) | __dstreg)
 
 #define AARCH64_LDR_POSTINC_64(__addrreg, __dstreg) \
-  (0xf8400400 | ((8 & 0x1ff) << 12) | (__addrreg << 5)| __dstreg)
+  (0xf8400400 | ((8 & 0x1ff) << 12) | (__addrreg << 5) | __dstreg)
+
+#define AARCH64_BRK(__im) (0xd4200000 | ((__im & 0xffff) << 5))
+#define AARCH64_HLT(__im) (0xd4400000 | ((__im & 0xffff) << 5))
 
 static inline bool aarch64_set_mod_reg_bits(struct adiv5_dap *d,
   uint32_t regaddr, uint32_t *reg_cache, uint32_t mask, uint32_t value)
@@ -259,7 +265,7 @@ int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr)
    * Because we are going to restore something, we are going to dirty X0, so
    * exclude it now to restore it as the last step
    */
-  for (i = 1; i < AARCH64_CORE_REGS_COUNT; ++i) {
+  for (i = 1; i < AARCH64_STATE_REGS; ++i) {
     ret = aarch64_restore_reg(a, baseaddr, i);
     if (ret)
       return ret;
@@ -342,6 +348,32 @@ int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
   return 0;
 }
 
+static int aarch64_breakpoint_sw(struct aarch64 *a, uint32_t baseaddr,
+  uint64_t addr, bool remove)
+{
+  int ret;
+  uint32_t opcode;
+  uint32_t orig_instr;
+
+  opcode = AARCH64_HLT(11);
+  ret = aarch64_read_mem_once(a, baseaddr, MEM_ACCESS_SIZE_32, addr,
+    &orig_instr);
+  if (ret)
+    return ret;
+
+  if (a->ctx.mmu_on)
+    return -ENOTSUP;
+
+  ret = aarch64_write_mem32_once(a, baseaddr, addr, opcode);
+  if (ret)
+    return ret;
+
+  if (a->ctx.mmu_on)
+      return -ENOTSUP;
+
+  return ret;
+}
+
 int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
   bool hardware, uint64_t arg)
 {
@@ -368,6 +400,9 @@ int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
       adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBCR0_EL1,
         ctrl);
     }
+  }
+  else {
+    return aarch64_breakpoint_sw(a, baseaddr, arg, remove);
   }
   return 0;
 }
@@ -437,6 +472,24 @@ int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
   }
   else if (reg == AARCH64_CORE_REG_DSPSR_EL0) {
     instructions[0] = 0xd53b4500;
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
+    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
+  }
+  else if (reg == AARCH64_CORE_REG_CTR_EL0) {
+    instructions[0] = AARCH64_I_MRS(X0, CTR_EL0);
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
+    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
+  }
+  else if (reg == AARCH64_CORE_REG_CLIDR_EL1) {
+    instructions[0] = AARCH64_I_MRS(X0, CLIDR_EL1);
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
+    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
+  }
+  else if (reg == AARCH64_CORE_REG_CSSELR_EL1) {
+    instructions[0] = AARCH64_I_MRS(X0, CSSELR_EL1);
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
     num_i = 2;
     a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;

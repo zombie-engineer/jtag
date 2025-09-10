@@ -37,11 +37,16 @@
 #define AARCH64_CORE_REG_X30 30
 #define AARCH64_CORE_REG_PC  31
 #define AARCH64_CORE_REG_SP  32
+#define AARCH64_STATE_REGS AARCH64_CORE_REG_SP
+
 #define AARCH64_CORE_REG_SCTLR_EL1 33
 #define AARCH64_CORE_REG_ESR_EL2   34
 #define AARCH64_CORE_REG_FAR_EL2   35
 #define AARCH64_CORE_REG_DISR_EL1  36
 #define AARCH64_CORE_REG_DSPSR_EL0 37
+#define AARCH64_CORE_REG_CTR_EL0   38
+#define AARCH64_CORE_REG_CLIDR_EL1 40
+#define AARCH64_CORE_REG_CSSELR_EL1 41
 #define AARCH64_CORE_REGS_COUNT    38
 #define AARCH64_CORE_REG_UNKNOWN 0xffff
 
@@ -92,6 +97,8 @@ struct aarch64 {
   struct adiv5_dap *dap;
   struct aarch64_dbg_regs_cache regs;
   struct aarch64_context ctx;
+  int cache_line_width_inst;
+  int cache_line_width_data;
 };
 
 int aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
