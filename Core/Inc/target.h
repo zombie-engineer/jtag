@@ -3,6 +3,11 @@
 #include "aarch64.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <breakpoint.h>
+
+#define NUM_BREAKPOINTS_SW 16
+#define NUM_BREAKPOINTS_HW 4
+
 
 struct target_core {
   struct aarch64 a64;
@@ -23,6 +28,8 @@ struct target {
   struct target_core core[4];
   bool attached;
   uint32_t idcode;
+  struct breakpoint breakpoints_sw[NUM_BREAKPOINTS_SW];
+  struct breakpoint breakpoints_hw[NUM_BREAKPOINTS_HW];
 };
 
 int target_halt(struct target *d);

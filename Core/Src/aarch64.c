@@ -373,63 +373,116 @@ static int aarch64_get_cache_info(struct aarch64 *a, uint32_t baseaddr)
   return 0;
 }
 
+static int aarch64_cache_flush_invalidate_flush(struct aarch64 *a,
+  uint32_t baseaddr, uint64_t start_addr, uint64_t end_addr)
+{
+  int ret = 0;
+  const uint32_t opcode_dc_civac = 0xd50b7e20;
+  uint64_t addr_mask = ~(uint64_t)(a->cache_line_width_inst - 1);
+  uint64_t cache_line_addr = start_addr & addr_mask;
+
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return -EIO;
+
+  while (cache_line_addr < end_addr) {
+    ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0,
+      cache_line_addr);
+
+    if (ret)
+      return ret;
+
+    ret = aarch64_exec(a, baseaddr, &opcode_dc_civac, 1);
+    if (ret)
+      return ret;
+
+    cache_line_addr += a->cache_line_width_inst;
+  }
+  return ret;
+}
+
 static int aarch64_breakpoint_sw(struct aarch64 *a, uint32_t baseaddr,
-  uint64_t addr, bool remove)
+  struct breakpoint *b, bool remove)
 {
   int ret;
-  uint32_t opcode;
-  uint32_t orig_instr;
+  uint32_t instr;
 
-  opcode = AARCH64_HLT(11);
-  ret = aarch64_read_mem_once(a, baseaddr, MEM_ACCESS_SIZE_32, addr,
-    &orig_instr);
+  if (b->addr & 3ul)
+    return -EINVAL;
+
+  if (!remove) {
+    /*
+     * We are inserting breakpoint, load previous instruction, which we are
+     * overwriting to restore it next time.
+     */
+    if (a->ctx.mmu_on) {
+      ret = aarch64_cache_flush_invalidate_flush(a, baseaddr, b->addr,
+        b->addr + 4);
+      if (ret)
+        return ret;
+    }
+
+    ret = aarch64_read_mem_once(a, baseaddr, MEM_ACCESS_SIZE_32, b->addr,
+      &b->instr);
+    if (ret)
+      return ret;
+    instr = AARCH64_HLT(11);
+  }
+  else {
+    instr = b->instr;
+  }
+
+  ret = aarch64_write_mem32_once(a, baseaddr, b->addr, instr);
   if (ret)
     return ret;
 
-  if (a->ctx.mmu_on)
-    return -ENOTSUP;
-
-  ret = aarch64_write_mem32_once(a, baseaddr, addr, opcode);
-  if (ret)
-    return ret;
-
-  if (a->ctx.mmu_on)
-      return -ENOTSUP;
+  if (a->ctx.mmu_on) {
+    ret = aarch64_cache_flush_invalidate_flush(a, baseaddr, b->addr,
+      b->addr + 4);
+    if (ret)
+      return ret;
+  }
 
   return ret;
 }
 
-int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
-  bool hardware, uint64_t arg)
+static int aarch64_breakpoint_hw(struct aarch64 *a, uint32_t baseaddr,
+  struct breakpoint *b, bool remove)
 {
-  if (hardware) {
-    uint32_t feature_lo;
-    uint32_t feature_hi;
-    uint32_t ctrl;
-    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDDFR_LO,
-      &feature_lo);
-    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDDFR_HI,
-      &feature_hi);
-    if (remove) {
-    }
-    else {
-      ctrl = 1 | (3<<1) | (1<<13) | (0xf << 5);
-      uint32_t addr_lo = arg & 0xffffffff;
-      uint32_t addr_hi = (arg >> 32) & 0xffffffff;
+  uint32_t feature_lo;
+  uint32_t feature_hi;
+  uint32_t ctrl;
 
-      adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBVR0_EL1,
-        addr_lo);
-      adiv5_mem_ap_write_word_e(a->dap,
-        baseaddr + DBG_REG_ADDR_DBGBVR0_EL1 + 4, addr_hi);
-
-      adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBCR0_EL1,
-        ctrl);
-    }
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDDFR_LO,
+    &feature_lo);
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDDFR_HI,
+    &feature_hi);
+  if (remove) {
+    ctrl = 0;
+    adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBCR0_EL1,
+      ctrl);
   }
   else {
-    return aarch64_breakpoint_sw(a, baseaddr, arg, remove);
+    ctrl = 1 | (3<<1) | (1<<13) | (0xf << 5);
+    uint32_t addr_lo = b->addr & 0xffffffff;
+    uint32_t addr_hi = (b->addr >> 32) & 0xffffffff;
+
+    adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBVR0_EL1,
+      addr_lo);
+    adiv5_mem_ap_write_word_e(a->dap,
+      baseaddr + DBG_REG_ADDR_DBGBVR0_EL1 + 4, addr_hi);
+
+    adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGBCR0_EL1,
+      ctrl);
   }
   return 0;
+}
+
+int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
+  bool hardware, struct breakpoint *b)
+{
+  if (hardware)
+    return aarch64_breakpoint_hw(a, baseaddr, b, remove);
+  return aarch64_breakpoint_sw(a, baseaddr, b, remove);
 }
 
 int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
@@ -807,11 +860,7 @@ int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
 
   adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
     0xb8004401);
-#if 0
-  adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
-    0xf8408400 | (5 << 5) | (1 << 0));
-#endif
-    // 0xb8404401);
+  /* 0xb8404401 */
 
   return aarch64_check_handle_sticky_error(a, baseaddr);
 }

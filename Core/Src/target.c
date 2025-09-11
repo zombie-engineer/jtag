@@ -7,17 +7,41 @@
 #include "common.h"
 #include <io_api.h>
 #include <errno.h>
+#include <string.h>
 
 #define ADIV5_MAX_ROM_ENTRIES 32
 
-int target_core_halt(struct target_core *c)
+static int target_core_set_sw_breakpoints(struct target_core *c,
+  struct breakpoint *sw_breakpoints, int num_breakpoints, bool remove)
+{
+  int ret;
+  int i;
+  struct breakpoint *b;
+  for (i = 0; i < num_breakpoints; ++i) {
+    b = &sw_breakpoints[i];
+    if (b->busy) {
+      ret = aarch64_breakpoint(&c->a64, c->debug, remove, false, b);
+      if (ret)
+        return ret;
+    }
+  }
+  return 0;
+}
+
+int target_core_halt(struct target_core *c, struct breakpoint *sw_breakpoints,
+  int num_breakpoints)
 {
   int ret = aarch64_halt(&c->a64, c->debug, c->cti);
   if (ret)
     return ret;
 
   c->halted = true;
-  return aarch64_fetch_context(&c->a64, c->debug);
+  ret = aarch64_fetch_context(&c->a64, c->debug);
+  if (ret)
+    return ret;
+
+  return target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
+    true);
 }
 
 static int target_core_exec(struct target_core *c, const uint32_t *const instr,
@@ -29,22 +53,35 @@ static int target_core_exec(struct target_core *c, const uint32_t *const instr,
   return aarch64_exec(&c->a64, c->debug, instr, count);
 }
 
-int target_core_check_halted(struct target_core *c)
+int target_core_check_halted(struct target_core *c,
+  struct breakpoint *sw_breakpoints, int num_breakpoints)
 {
   int ret = aarch64_check_halted(&c->a64, c->debug);
   if (ret)
     return ret;
 
   c->halted = true;
+
+  ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
+    true);
+  if (ret)
+    return ret;
+
   return aarch64_fetch_context(&c->a64, c->debug);
 }
 
-int target_core_resume(struct target_core *c)
+int target_core_resume(struct target_core *c,
+  struct breakpoint *sw_breakpoints, int num_breakpoints)
 {
   int ret;
 
   if (!c->halted)
     return -EINVAL;
+
+  ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
+    false);
+  if (ret)
+    return ret;
 
   ret = aarch64_restore_before_resume(&c->a64, c->debug);
   if (ret)
@@ -57,35 +94,52 @@ int target_core_resume(struct target_core *c)
   return ret;
 }
 
-int target_core_step(struct target_core *c)
+int target_core_step(struct target_core *c, struct breakpoint *sw_breakpoints,
+  int num_breakpoints)
 {
   int ret;
 
   if (!c->halted)
     return -EINVAL;
 
+  ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
+    false);
+  if (ret)
+    return ret;
+
   ret = aarch64_restore_before_resume(&c->a64, c->debug);
   if (ret)
     return ret;
 
   ret = aarch64_step(&c->a64, c->debug, c->cti);
-  if (!ret)
-    ret = aarch64_fetch_context(&c->a64, c->debug);
+  if (ret)
+    return ret;
+
+  ret = aarch64_fetch_context(&c->a64, c->debug);
+  if (ret)
+    return ret;
+
+  ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
+    true);
+  if (ret)
+    return ret;
 
   return ret;
 }
 
 int target_core_breakpoint(struct target_core *c, bool remove, bool hardware,
-  uint64_t arg)
+  struct breakpoint *b)
 {
   if (!c->halted)
     return -EINVAL;
-  return aarch64_breakpoint(&c->a64, c->debug, remove, hardware, arg);
+
+  return aarch64_breakpoint(&c->a64, c->debug, remove, hardware, b);
 }
 
 int target_halt(struct target *t)
 {
-  return target_core_halt(&t->core[0]);
+  return target_core_halt(&t->core[0], t->breakpoints_sw,
+    ARRAY_SIZE(t->breakpoints_sw));
 }
 
 int target_exec(struct target *t, const uint32_t *instr, int count)
@@ -95,7 +149,8 @@ int target_exec(struct target *t, const uint32_t *instr, int count)
 
 int target_check_halted(struct target *t)
 {
-  return target_core_check_halted(&t->core[0]);
+  return target_core_check_halted(&t->core[0], t->breakpoints_sw,
+    ARRAY_SIZE(t->breakpoints_sw));
 }
 
 bool target_is_halted(const struct target *t)
@@ -105,18 +160,75 @@ bool target_is_halted(const struct target *t)
 
 int target_resume(struct target *t)
 {
-  return target_core_resume(&t->core[0]);
+  return target_core_resume(&t->core[0], t->breakpoints_sw,
+    ARRAY_SIZE(t->breakpoints_sw));
 }
 
 int target_step(struct target *t)
 {
-  return target_core_step(&t->core[0]);
+  return target_core_step(&t->core[0], t->breakpoints_sw,
+    ARRAY_SIZE(t->breakpoints_sw));
+}
+
+static struct breakpoint *target_get_breakpoint(struct target *t,
+  bool hardware, uint64_t addr, bool busy)
+{
+  int i;
+  struct breakpoint *bps, *b;
+  int num_bps;
+
+  if (hardware) {
+    bps = t->breakpoints_hw;
+    num_bps = ARRAY_SIZE(t->breakpoints_hw);
+  }
+  else {
+    bps = t->breakpoints_sw;
+    num_bps = ARRAY_SIZE(t->breakpoints_sw);
+  }
+
+  for (i = 0; i < num_bps; ++i) {
+    b = &bps[i];
+    if (!busy) {
+      if (!b->busy) {
+        b->busy = true;
+        b->enabled = true;
+        b->addr = addr;
+        return b;
+      }
+    } else {
+      /* busy, we are looking for existing breakpoint with matching addr  */
+      if (b->addr == addr)
+        return b;
+    }
+  }
+  return NULL;
 }
 
 int target_breakpoint(struct target *t, bool remove, bool hardware,
-  uint64_t arg)
+  uint64_t addr)
 {
-  return target_core_breakpoint(&t->core[0], remove, hardware, arg);
+  struct breakpoint *b;
+
+  b = target_get_breakpoint(t, hardware, addr, remove);
+  if (!b)
+    return remove ? -EINVAL : -ENOMEM;
+
+  if (!remove) {
+    /* HW breakpoint can be set now (immediately) */
+    if (hardware)
+      return target_core_breakpoint(&t->core[0], remove, hardware, b);
+
+    /* Software breakpoints are set during resume */
+    return 0;
+  }
+
+  /* remove */
+  if (hardware)
+    return target_core_breakpoint(&t->core[0], remove, hardware, b);
+
+  /* sw breakpoint is removed now */
+  b->busy = false;
+  return 0;
 }
 
 static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)
@@ -308,11 +420,19 @@ int target_soft_reset(struct target *t)
   return ret;
 }
 
+static void target_init_state(struct target *t)
+{
+  memset(t->breakpoints_sw, 0, sizeof(t->breakpoints_sw));
+  memset(t->breakpoints_hw, 0, sizeof(t->breakpoints_hw));
+}
+
 int target_init(struct target *t)
 {
   int i;
   int num_devs;
   int ret = 0;
+
+  target_init_state(t);
 
   jtag_init();
   jtag_reset();

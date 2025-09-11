@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <sys/types.h>
 #include <io_api.h>
+#include <breakpoint.h>
 
 #define AARCH64_CORE_REG_X0 0
 #define AARCH64_CORE_REG_X1 1
@@ -122,7 +123,7 @@ int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
 int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr);
 
 int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
-  bool hardware, uint64_t arg);
+  bool hardware, struct breakpoint *b);
 
 void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
