@@ -277,6 +277,25 @@ class Target:
     if err:
       print('Failed to write', lines)
 
+  def breakpoint(self, addr, kind, add=True, hardware=False):
+    action = 'setting' if add else 'removing'
+    print(f'{action} breakpoint, addr:0x{addr:016x}, kind:{kind}, hw:{hardware}')
+
+    cmd = 'bp'
+    if hardware:
+      cmd += 'h'
+    else:
+      cmd += 's'
+    if not add:
+      cmd += 'd'
+
+    self.write(f'{cmd} 0x{addr:016x}')
+    err, lines = self.wait_cursor()
+    if err:
+      print('Failed to write', lines)
+      return False
+    return True
+
 
 def assert_state(is_acmd, cmd_idx, state):
   if not is_acmd and cmd_idx == 0:

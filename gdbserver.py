@@ -237,16 +237,17 @@ class JTAGBackend(Backend):
 
   # --- Breakpoints ---
   def set_sw_break(self, addr: int, kind: int) -> bool:
-    raise Exception('sw break')
+    print('set_sw_break')
+    return self.__t.breakpoint(addr, kind, add=True, hardware=False)
 
   def clr_sw_break(self, addr: int, kind: int) -> bool:
-    raise Exception('clr sw break')
+    return self.__t.breakpoint(addr, kind, add=False, hardware=False)
 
   def set_hw_break(self, addr: int, kind: int) -> bool:
-    raise Exception('set hw break')
+    return self.__t.breakpoint(addr, kind, add=True, hardware=True)
 
   def clr_hw_break(self, addr: int, kind: int) -> bool:
-    raise Exception('clr hw break')
+    return self.__t.breakpoint(addr, kind, add=False, hardware=True)
 
 
 # ------------------------------- RSP core ---------------------------------
@@ -439,23 +440,20 @@ class RSPServer:
 
     # Breakpoints Z/z type,addr,kind
     if pkt.startswith("Z") or pkt.startswith("z"):
-      try:
-        add = pkt[1] == 'Z'
-        body = pkt[2:]
-        type_s, addr_s, kind_s = body.split(",")
-        btype = int(type_s, 16)
-        addr = int(addr_s, 16)
-        kind = int(kind_s, 16)
+      add = pkt[0] == 'Z'
+      body = pkt[1:]
+      type_s, addr_s, kind_s = body.split(",")
+      btype = int(type_s, 10)
+      addr = int('0x' + addr_s, 16)
+      kind = int(kind_s, 16)
+      ok = False
+      if btype == 0:  # swbp
+        ok = self.backend.set_sw_break(addr, kind) if add else self.backend.clr_sw_break(addr, kind)
+      elif btype == 1:  # hwbp
+        ok = self.backend.set_hw_break(addr, kind) if add else self.backend.clr_hw_break(addr, kind)
+      else:
         ok = False
-        if btype == 0:  # swbp
-          ok = self.backend.set_sw_break(addr, kind) if add else self.backend.clr_sw_break(addr, kind)
-        elif btype == 1:  # hwbp
-          ok = self.backend.set_hw_break(addr, kind) if add else self.backend.clr_hw_break(addr, kind)
-        else:
-          ok = False
-        self.send_ok() if ok else self.send_error(1)
-      except Exception:
-        self.send_error(1)
+      self.send_ok() if ok else self.send_error(1)
       return
 
     # vCont
