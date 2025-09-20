@@ -313,8 +313,6 @@ static int target_core_mem_read(struct target_core *c,
     return ret;
 
   for (i = 0; i < count; ++i) {
-    uint64_t value;
-
     ret = aarch64_read_mem32_fast_next(&c->a64, c->debug, (uint32_t *)&value);
     if (ret)
       return ret;
@@ -327,7 +325,12 @@ static int target_core_mem_read(struct target_core *c,
     }
     cb(value, access_size);
   }
-  return aarch64_read_mem32_fast_stop(&c->a64, c->debug);
+
+  ret = aarch64_read_mem32_fast_stop(&c->a64, c->debug);
+  if (ret)
+    return ret;
+
+  return aarch64_read_mem32_fast_next(&c->a64, c->debug, (uint32_t *)&value);
 }
 
 int target_core_mem_read_fast_start(struct target_core *c, uint64_t addr)

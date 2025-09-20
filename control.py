@@ -219,7 +219,8 @@ class Target:
   def read_reg(self, regname):
     self.write(f'rr {regname}')
     err, lines = self.wait_cursor()
-    return lines
+    value = int(lines, 0) if err == 0 else 0
+    return err == 0, value
 
   def resume(self):
     self.write('resume')
@@ -258,7 +259,7 @@ class Target:
     err, lines = self.wait_cursor()
     if err:
       print(f'Mem read cmd failed, err:{err}, details:{lines}')
-      return
+      return []
 
     if len(lines) and lines[0] == cmd:
       lines.pop(0)
@@ -272,10 +273,18 @@ class Target:
     return self.__mem_read(64, address, count)
 
   def mem_write32(self, address, value):
-    self.write(f'w32 0x{address:08x} 0x{value:08x}')
+    self.write(f'w32 0x{address:016x} 0x{value:08x}')
     err, lines = self.wait_cursor()
     if err:
       print('Failed to write', lines)
+    return err == 0
+
+  def mem_write64(self, address, value):
+    self.write(f'w64 0x{address:016x} 0x{value:016x}')
+    err, lines = self.wait_cursor()
+    if err:
+      print('Failed to write', lines)
+    return err == 0
 
   def breakpoint(self, addr, kind, add=True, hardware=False):
     action = 'setting' if add else 'removing'
@@ -531,7 +540,8 @@ class Soc:
 
   def resume(self):
     self.__t.write_reg('pc', 0x80000 + 4)
-    logging.debug(self.__t.read_reg('pc'))
+    err, pc_value = self.__t.read_reg('pc')
+    logging.debug(pc_value)
     self.__t.resume()
 
 

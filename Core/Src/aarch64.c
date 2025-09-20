@@ -37,6 +37,8 @@
 #define CTR_EL0    MRSMSR_SYSREG(0b11, 0b011, 0b0000, 0b0000, 0b001)
 #define CLIDR_EL1  MRSMSR_SYSREG(0b11, 0b001, 0b0000, 0b0000, 0b001)
 #define CSSELR_EL1 MRSMSR_SYSREG(0b11, 0b010, 0b0000, 0b0000, 0b000)
+#define VBAR_EL1   MRSMSR_SYSREG(0b11, 0b000, 0b1100, 0b0000, 0b000)
+/* d538c000 */
 
 #define AARCH64_I_MSR(__dstreg, __srcreg) \
   (0xd5100000 | __dstreg | (__srcreg & 0x1f))
@@ -156,7 +158,22 @@ static inline int aarch64_check_handle_sticky_error(struct aarch64 *a,
 int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr)
 {
   int ret = -EAGAIN;
-  int ret2;
+  int status;
+
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+
+  if (aarch64_edscr_is_error(a->regs.edscr)) {
+    ret = aarc64_clear_stick_error_bits(a, baseaddr);
+    if (ret)
+      return ret;
+
+    ret = aarch64_read_status_regs(a->dap, &a->regs, baseaddr, false);
+    if (ret)
+      return ret;
+
+    return -EIO;
+  }
 
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR,
     &a->regs.edprsr);
@@ -164,8 +181,11 @@ int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr)
   if (aarch64_edprsr_is_halted(a->regs.edprsr))
     ret = 0;
 
-  ret2 = aarch64_check_handle_sticky_error(a, baseaddr);
-  return ret2 ? ret2 : ret;
+  status = aarch64_edscr_get_status(a->regs.edscr);
+  if (status == EDSCR_STATUS_EXCEPT_CATCH)
+    return -EINTR;
+
+  return 0;
 }
 
 int aarch64_halt(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
@@ -560,6 +580,12 @@ int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
     num_i = 2;
     a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
   }
+  else if (reg == AARCH64_CORE_REG_VBAR_EL1) {
+    instructions[0] = AARCH64_I_MRS(X0, VBAR_EL1);
+    instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
+    num_i = 2;
+    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
+  }
   else if (reg == AARCH64_CORE_REG_CLIDR_EL1) {
     instructions[0] = AARCH64_I_MRS(X0, CLIDR_EL1);
     instructions[1] = AARCH64_INSTR_MSR_DBGDTR_EL0(0);
@@ -689,6 +715,14 @@ int aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
     return ret;
 
   ret = aarch64_get_cache_info(a, baseaddr);
+  if (ret)
+    return ret;
+
+  ret = aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_VBAR_EL1, &reg);
+  if (ret)
+    return ret;
+
+  c->vbar_el1 = reg;
   return 0;
 }
 

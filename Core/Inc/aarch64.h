@@ -48,7 +48,7 @@
 #define AARCH64_CORE_REG_CTR_EL0   38
 #define AARCH64_CORE_REG_CLIDR_EL1 40
 #define AARCH64_CORE_REG_CSSELR_EL1 41
-#define AARCH64_CORE_REGS_COUNT    38
+#define AARCH64_CORE_REG_VBAR_EL1   42
 #define AARCH64_CORE_REG_UNKNOWN 0xffff
 
 
@@ -59,6 +59,7 @@ struct aarch64_context {
   uint64_t sp;
   uint64_t x0_30[31];
   uint64_t sctlr_el1;
+  uint64_t vbar_el1;
   uint64_t dirty_mask;
   int el;
   uint64_t pstate;

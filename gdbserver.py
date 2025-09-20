@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+
 """
-Minimal-but-correct-ish AArch64 GDB RSP stub that bridges to a custom JTAG device
+Minimalistic GDB server proxy that is part of this scheme:
+gdb->[gdbserver.py]->control.py->stm32discovery JTAG firmware->Raspberry Pi
 over /dev/ttyACM* using a simple placeholder protocol.
 
 Features implemented (stubbed where necessary):
@@ -31,10 +33,16 @@ import time
 import control
 import logging
 from typing import Optional, Tuple, Dict
-
 import serial
 
-# -------------------------- Utility: hex helpers --------------------------
+AARCH64_NUM_REGS = 33
+AARCH64_REGSET_SIZE = AARCH64_NUM_REGS * 8
+
+def swap_bytes_64(value: int) -> int:
+    if not (0 <= value < 1 << 64):
+        raise ValueError("Value must be a 64-bit integer")
+    v = value.to_bytes(8, byteorder='little')
+    return int.from_bytes(v, byteorder='big')
 
 def to_hex(data: bytes) -> str:
   return binascii.hexlify(data).decode()
@@ -42,80 +50,9 @@ def to_hex(data: bytes) -> str:
 def from_hex(s: str) -> bytes:
   return binascii.unhexlify(s.encode())
 
-# ---------------------- AArch64 register layout (stub) --------------------
-# If you do not serve target.xml, GDB has a built-in AArch64 layout. Returning
-# zeros is acceptable; endianness per-register is the target's (LE on most Linux).
-# We'll return 34 64-bit zeros (x0-x30, sp, pc, pstate) = 34 * 8 bytes.
-AARCH64_NUM_REGS = 33
-AARCH64_REGSET_SIZE = AARCH64_NUM_REGS * 8
-
-# ----------------------------- Backend API --------------------------------
-
-class Backend:
-  """Abstract backend your JTAG device implements."""
-  def connect(self):
-    raise NotImplementedError
-
-  def disconnect(self):
-    raise NotImplementedError
-
-  # Execution control
-  def continue_(self) -> None:
-    raise NotImplementedError
-
-  def step(self) -> None:
-    raise NotImplementedError
-
-  def interrupt(self) -> None:
-    """Stop/Break the target (for ^C)."""
-    raise NotImplementedError
-
-  def wait_stop(self, timeout: Optional[float] = None) -> Tuple[str, Optional[int]]:
-    """Block until target stops. Return (reason, signal).
-    reason: 'signal' | 'breakpoint' | 'watch' | 'exit'
-    signal: POSIX signal number (e.g., 5 = SIGTRAP) or None
-    """
-    return ("signal", 5)
-
-  # Registers
-  def read_all_registers(self) -> bytes:
-    return b"\x00" * AARCH64_REGSET_SIZE
-
-  def write_all_registers(self, raw: bytes) -> bool:
-    return True
-
-  # Memory
-  def read_mem(self, addr: int, length: int) -> Optional[bytes]:
-    return b"\x00" * length
-
-  def write_mem(self, addr: int, data: bytes) -> bool:
-    return True
-
-  # Breakpoints
-  def set_sw_break(self, addr: int, kind: int) -> bool:
-    return True
-
-  def clr_sw_break(self, addr: int, kind: int) -> bool:
-    return True
-
-  def set_hw_break(self, addr: int, kind: int) -> bool:
-    return True
-
-  def clr_hw_break(self, addr: int, kind: int) -> bool:
-    return True
-
-  # Threads (single-thread stub)
-  def list_threads(self):
-    return [1]
-
-  def current_thread(self):
-    return 1
-
-  def set_thread(self, tid: int) -> bool:
-    return tid == 1
 
 
-class JTAGBackend(Backend):
+class JTAGBackend:
   """Skeleton backend that speaks to a custom JTAG over /dev/ttyACM* using pyserial.
   Replace send_cmd/parse_* bodies with your device's real protocol.
   """
@@ -135,7 +72,6 @@ class JTAGBackend(Backend):
     if self.__t:
       self.__t = None
 
-  # --- Placeholder protocol helpers ---
   def send_cmd(self, cmd: str, payload: bytes = b"") -> bytes:
     """Send a line command like: CMD <hex>\n and read a single line reply."""
     self.__t.write(payload)
@@ -144,7 +80,6 @@ class JTAGBackend(Backend):
     self.ser.flush()
     return self.ser.readline().strip()
 
-  # --- Execution control ---
   def continue_(self) -> None:
     self.__t.resume()
 
@@ -163,7 +98,6 @@ class JTAGBackend(Backend):
       time.sleep(1)
     return ("signal", 5)
 
-  # --- Registers ---
   def read_all_registers(self) -> bytes:
     print('read_all_registers')
     all_regs = self.__t.dump_regs()
@@ -173,6 +107,29 @@ class JTAGBackend(Backend):
     for r in order:
       b.extend(regs[r].to_bytes(8, 'little'))
     return bytes(b)
+
+  def reg_id_to_name(self, reg_id) -> str:
+    if reg_id <= 30:
+      return f'x{reg_id}'
+    elif reg_id == 31:
+      return 'sp'
+    elif reg_id == 32:
+      return 'pc'
+    return None
+
+  def write_register(self, reg_id, regval) -> bool:
+    regname = self.reg_id_to_name(reg_id)
+    print('regname', regname, reg_id)
+    if not regname:
+      return False
+    return self.__t.write_reg(regname, swap_bytes_64(regval))
+
+  def read_register(self, reg_id):
+    regname = self.reg_id_to_name(reg_id)
+    if not regname:
+      return False, 0
+    value = self.__t.read_reg(regname, regval)
+    return True, value
 
   def write_all_registers(self, raw: bytes) -> bool:
     num_regs = int(len(raw) / 8)
@@ -189,12 +146,13 @@ class JTAGBackend(Backend):
         return False
     return True
 
-  # --- Memory ---
   def read_mem(self, addr: int, length: int) -> Optional[bytes]:
     print(f'read mem: addr 0x{addr:016x}, length:{length}')
     word_size = 8
     if length == 0:
       return b''
+    if length == 4:
+      word_size = 4
     if word_size == 8:
       addrmask = 0xfffffffffffffff8
     elif word_size == 4:
@@ -231,11 +189,14 @@ class JTAGBackend(Backend):
     return result
 
   def write_mem(self, addr: int, data: bytes) -> bool:
-    print(f'write mem: {addr:016x}, data:{data}')
-    raise Exception('write mem not supported')
-    return self.__t.mem_write32(addr, data)
+    print(f'write_mem: {addr:016x}, data:{data}')
+    if len(data) == 4:
+      return self.__t.mem_write32(addr, int().from_bytes(data, 'little'))
+    if len(data) == 8:
+      return self.__t.mem_write64(addr, int().from_bytes(data, 'little'))
+    print(f'write_mem: data length unsupported {len(data)}')
+    return False
 
-  # --- Breakpoints ---
   def set_sw_break(self, addr: int, kind: int) -> bool:
     print('set_sw_break')
     return self.__t.breakpoint(addr, kind, add=True, hardware=False)
@@ -249,11 +210,18 @@ class JTAGBackend(Backend):
   def clr_hw_break(self, addr: int, kind: int) -> bool:
     return self.__t.breakpoint(addr, kind, add=False, hardware=True)
 
+  def list_threads(self):
+    return [1]
 
-# ------------------------------- RSP core ---------------------------------
+  def current_thread(self):
+    return 1
+
+  def set_thread(self, tid: int) -> bool:
+    return tid == 1
+
 
 class RSPServer:
-  def __init__(self, host: str, port: int, backend: Backend):
+  def __init__(self, host: str, port: int, backend: JTAGBackend):
     self.host = host
     self.port = port
     self.backend = backend
@@ -337,29 +305,100 @@ class RSPServer:
             self._send_raw(b"-")
           # continue loop to read next packet
 
-  # ---------------------- Command handling ----------------------
+  def on_breakpoint(self, pkt):
+    add = pkt[0] == 'Z'
+    body = pkt[1:]
+    type_s, addr_s, kind_s = body.split(",")
+    btype = int(type_s, 10)
+    addr = int('0x' + addr_s, 16)
+    kind = int(kind_s, 16)
+    ok = False
+    if btype == 0:  # swbp
+      ok = self.backend.set_sw_break(addr, kind) if add else self.backend.clr_sw_break(addr, kind)
+    elif btype == 1:  # hwbp
+      ok = self.backend.set_hw_break(addr, kind) if add else self.backend.clr_hw_break(addr, kind)
+    else:
+      ok = False
+    self.send_ok() if ok else self.send_error(1)
+
+  def on_memory_read(self, body):
+    # maddr,length
+    addr_s, len_s = body.split(",")
+    addr = int(addr_s, 16)
+    length = int(len_s, 16)
+    data = self.backend.read_mem(addr, length)
+    if len(data) == length:
+      self.send_packet(to_hex(data))
+    else:
+      print(f'error, data is {data}, len:{len(data)}, should_be:{length}')
+      self.send_error(1)
+
+  def on_reg_access(self, body, read):
+    if not read:
+      reg_id, value = body.split('=')
+      reg_id = int('0x' + reg_id, 16)
+      value = int('0x' + value, 16)
+      print(f'requested register write reg {reg_id} = 0x{value:016x}')
+      if self.backend.write_register(reg_id, value):
+        self.send_ok()
+      else:
+        self.send_error(1)
+      return
+
+    reg_id = int('0x' + body, 16)
+    success, value = self.backend.read_register(reg_id)
+    if succes:
+      self.send_packet(f'{value:016x}')
+    else:
+      self.send_error(1)
+
+  def on_memory_write(self, body):
+    # Maddr,length:data
+    # Example of a command: Mffff000000373628,8:ff00000000000000
+    addr_len, hexdata = body.split(":", 1)
+    addr_s, len_s = addr_len.split(",")
+    addr = int(addr_s, 16)
+    length = int(len_s, 16)
+    data = from_hex(hexdata)
+    ok = len(data) == length
+    if ok:
+      ok = self.backend.write_mem(addr, data)
+    if ok:
+      self.send_ok()
+    else:
+      self.send_error(1)
+
+  def on_q_supported(self):
+    # You can add more tokens as you implement them.
+    self.send_packet("PacketSize=4000;swbreak+;hwbreak+;vContSupported+;QStartNoAckMode+")
+ 
+  def on_q_start_no_ack_mode(self):
+    self.no_ack_mode = True
+    self._send_raw(b"+")  # acknowledge the command itself
+    self.send_ok()
+
+  def on_v_must_reply_empty(self):
+    self.send_packet("")
+
+  def on_q_attached(self):
+    self.send_packet("1")
+
+  def q_xfer_features_read(self):
+    # Not serving target.xml; reply with 'l' (end of data)
+    self.send_packet("l")
 
   def handle(self, pkt: str):
     # Queries first
     if pkt.startswith("qSupported"):
-      # You can add more tokens as you implement them.
-      self.send_packet("PacketSize=4000;swbreak+;hwbreak+;vContSupported+;QStartNoAckMode+")
-      return
+      return self.on_q_supported()
     if pkt == "QStartNoAckMode":
-      self.no_ack_mode = True
-      self._send_raw(b"+")  # acknowledge the command itself
-      self.send_ok()
-      return
+      return self.on_q_start_no_ack_mode()
     if pkt.startswith("vMustReplyEmpty"):
-      self.send_packet("")
-      return
+      return self.on_v_must_reply_empty()
     if pkt == "qAttached":
-      self.send_packet("1")
-      return
+      return self.on_q_attached()
     if pkt.startswith("qXfer:features:read"):
-      # Not serving target.xml; reply with 'l' (end of data)
-      self.send_packet("l")
-      return
+      return self.q_xfer_features_read()
     if pkt == "qfThreadInfo":
       tids = self.backend.list_threads()
       if tids:
@@ -405,56 +444,17 @@ class RSPServer:
         self.send_error(1)
       return
 
-    # Memory
+    if pkt[0] in ['P', 'p']:
+      return self.on_reg_access(pkt[1:], pkt[0] == 'p')
     if pkt.startswith("m"):
-      # maddr,length
-      try:
-        body = pkt[1:]
-        addr_s, len_s = body.split(",")
-        addr = int(addr_s, 16)
-        length = int(len_s, 16)
-        data = self.backend.read_mem(addr, length)
-        if data is None or len(data) != length:
-          print(f'error, data is {data}, len:{len(data)}, should_be:{length}')
-          self.send_error(1)
-        else:
-          self.send_packet(to_hex(data))
-      except Exception as e:
-        print('Exception during read memory', e)
-        self.send_error(1)
-      return
+      return self.on_memory_read(pkt[1:])
+
     if pkt.startswith("M"):
-      # Maddr,length:XX...
-      try:
-        body = pkt[1:]
-        addr_len, hexdata = body.split(":", 1)
-        addr_s, len_s = addr_len.split(",")
-        addr = int(addr_s, 16)
-        length = int(len_s, 16)
-        data = from_hex(hexdata)
-        ok = len(data) == length and self.backend.write_mem(addr, data)
-        self.send_ok() if ok else self.send_error(1)
-      except Exception:
-        self.send_error(1)
-      return
+      return self.on_memory_write(pkt[1:])
 
     # Breakpoints Z/z type,addr,kind
     if pkt.startswith("Z") or pkt.startswith("z"):
-      add = pkt[0] == 'Z'
-      body = pkt[1:]
-      type_s, addr_s, kind_s = body.split(",")
-      btype = int(type_s, 10)
-      addr = int('0x' + addr_s, 16)
-      kind = int(kind_s, 16)
-      ok = False
-      if btype == 0:  # swbp
-        ok = self.backend.set_sw_break(addr, kind) if add else self.backend.clr_sw_break(addr, kind)
-      elif btype == 1:  # hwbp
-        ok = self.backend.set_hw_break(addr, kind) if add else self.backend.clr_hw_break(addr, kind)
-      else:
-        ok = False
-      self.send_ok() if ok else self.send_error(1)
-      return
+      return self.on_breakpoint(pkt)
 
     # vCont
     if pkt == "vCont?":
@@ -518,11 +518,11 @@ class RSPServer:
           self.handle(pkt)
 
 
-# ---------------------------------- main ----------------------------------
-
 def main():
   import argparse
-  p = argparse.ArgumentParser(description="AArch64 GDB RSP stub bridging to a JTAG over /dev/ttyACM*")
+  p = argparse.ArgumentParser(
+    description="AArch64 GDB RSP stub bridging to a JTAG over /dev/ttyACM*")
+
   p.add_argument("--host", default="0.0.0.0")
   p.add_argument("--port", type=int, default=1234)
   p.add_argument("--serial", default="/dev/ttyACM0")
