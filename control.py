@@ -219,7 +219,7 @@ class Target:
   def read_reg(self, regname):
     self.write(f'rr {regname}')
     err, lines = self.wait_cursor()
-    value = int(lines, 0) if err == 0 else 0
+    value = int(lines[1], 0) if err == 0 else 0
     return err == 0, value
 
   def resume(self):

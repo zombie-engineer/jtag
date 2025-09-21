@@ -16,6 +16,7 @@
 #define EDSCR_SDD         16
 #define EDSCR_NS          18
 #define EDSCR_SC2         19
+/* Memory mode (opposite to Normal mode) */
 #define EDSCR_MA          20
 #define EDSCR_TDA         21
 #define EDSCR_INTdis      22
@@ -46,17 +47,22 @@
 #define EDECR_BIT_RCE   1
 #define EDECR_BIT_SS    2
 
+#define EDESR_BIT_OSUC 0
+#define EDESR_BIT_RC 1
+#define EDESR_BIT_SS 2
+#define EDESR_BIT_EC 3
+
 static inline int aarch64_edscr_get_status(uint32_t edscr)
 {
   return edscr & EDSCR_STATUS_MASK;
 }
 
-static inline bool aarch64_edscr_is_error(uint32_t edscr)
+static inline bool aarch64_edscr_is_err_set(uint32_t edscr)
 {
   return (edscr >> EDSCR_ERR) & 1;
 }
 
-static inline bool aarch64_edscr_is_tx_full(uint32_t edscr)
+static inline bool aarch64_edscr_is_tx_full_set(uint32_t edscr)
 {
   return (edscr >> EDSCR_TX_FULL) & 1;
 }
@@ -66,10 +72,28 @@ static inline int aarch64_edscr_get_el(uint32_t edscr)
   return (edscr >> EDSCR_EL) & ((1 << EDSCR_EL_WIDTH) - 1);
 }
 
-static inline int aarch64_edscr_is_mem_mode(uint32_t edscr)
+static inline bool aarch64_edscr_is_ma_set(uint32_t edscr)
 {
   return (edscr >> EDSCR_MA) & 1;
 }
 
+static inline bool aarch64_edesr_is_osuc_set(uint32_t edesr)
+{
+  return (edesr >> EDESR_BIT_OSUC) & 1;
+}
 
+static inline bool aarch64_edesr_is_rc_set(uint32_t edesr)
+{
+  return (edesr >> EDESR_BIT_RC) & 1;
+}
+
+static inline bool aarch64_edesr_is_ss_set(uint32_t edesr)
+{
+  return (edesr >> EDESR_BIT_SS) & 1;
+}
+
+static inline bool aarch64_edesr_is_ec_set(uint32_t edesr)
+{
+  return (edesr >> EDESR_BIT_EC) & 1;
+}
 

@@ -16,6 +16,9 @@
 #define CHRCMP3(__str, __c0, __c1, __c2) \
   ((__str)[0] == (__c0) && (__str)[1] == (__c1) && (__str)[2] == (__c2))
 
+#define CHRCMP4(__str, __c0, __c1, __c2, __c3) \
+  (CHRCMP3(__str, __c0, __c1, __c2) && (__str[3]) == (__c3))
+
 static inline int parse_reg_name(bool is_write, const char **ptr,
   const char *end)
 {
@@ -44,6 +47,24 @@ static inline int parse_reg_name(bool is_write, const char **ptr,
     if (CHRCMP2(p, 's', 'p')) {
       reg_id = AARCH64_CORE_REG_SP;
       p += 2;
+      goto out;
+    }
+  }
+
+  if ((!is_write && end - p == 4) || (is_write && end - p > 5 && p[4] == ' ')) {
+    if (CHRCMP4(p, 'c', 'p', 's', 'r')) {
+      reg_id = AARCH64_CORE_REG_CPSR;
+      p += 4;
+      goto out;
+    }
+    if (CHRCMP4(p, 'f', 'p', 's', 'r')) {
+      reg_id = AARCH64_CORE_REG_FPSR;
+      p += 4;
+      goto out;
+    }
+    if (CHRCMP4(p, 'f', 'p', 'c', 'r')) {
+      reg_id = AARCH64_CORE_REG_FPCR;
+      p += 4;
       goto out;
     }
   }
@@ -325,6 +346,10 @@ bool cmdbuf_parse(struct cmd *c, const char *buf, const char *end)
   }
   if (!strncmp(p, "dumpregs", 8)) {
     c->cmd = CMD_TARGET_DUMP_REGS;
+    return true;
+  }
+  if (!strncmp(p, "fetchregs", 9)) {
+    c->cmd = CMD_TARGET_FETCH_REGS;
     return true;
   }
   if (!strncmp(p, "init", 4)) {

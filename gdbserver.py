@@ -39,10 +39,11 @@ AARCH64_NUM_REGS = 33
 AARCH64_REGSET_SIZE = AARCH64_NUM_REGS * 8
 
 def swap_bytes_64(value: int) -> int:
+    """Swap bytes of a 64-bit integer (endianness conversion)."""
     if not (0 <= value < 1 << 64):
         raise ValueError("Value must be a 64-bit integer")
-    v = value.to_bytes(8, byteorder='little')
-    return int.from_bytes(v, byteorder='big')
+    # Convert to bytes, reverse, convert back to int
+    return int.from_bytes(value.to_bytes(8, byteorder='little'), byteorder='big')
 
 def to_hex(data: bytes) -> str:
   return binascii.hexlify(data).decode()
@@ -115,6 +116,12 @@ class JTAGBackend:
       return 'sp'
     elif reg_id == 32:
       return 'pc'
+    elif reg_id == 33:
+      return 'cpsr'
+    elif reg_id == 66:
+      return 'fpsr'
+    elif reg_id == 67:
+      return 'fpcr'
     return None
 
   def write_register(self, reg_id, regval) -> bool:
@@ -128,8 +135,7 @@ class JTAGBackend:
     regname = self.reg_id_to_name(reg_id)
     if not regname:
       return False, 0
-    value = self.__t.read_reg(regname, regval)
-    return True, value
+    return self.__t.read_reg(regname)
 
   def write_all_registers(self, raw: bytes) -> bool:
     num_regs = int(len(raw) / 8)
@@ -347,7 +353,7 @@ class RSPServer:
 
     reg_id = int('0x' + body, 16)
     success, value = self.backend.read_register(reg_id)
-    if succes:
+    if success:
       self.send_packet(f'{value:016x}')
     else:
       self.send_error(1)
