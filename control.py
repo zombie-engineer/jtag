@@ -181,6 +181,7 @@ class Target:
   def check_is_halted(self):
     self.write('?halted')
     err, lines = self.wait_cursor()
+    print(err, lines)
     return err == 0
 
   def update_status(self):
@@ -191,6 +192,7 @@ class Target:
       if status.strip():
         break
 
+    print(status)
     status = status.split(':')[1]
     self.__status.attached = 'not attached' not in status
     if self.__status.attached:

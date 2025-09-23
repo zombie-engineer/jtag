@@ -19,11 +19,12 @@ static int target_core_set_sw_breakpoints(struct target_core *c,
   struct breakpoint *b;
   for (i = 0; i < num_breakpoints; ++i) {
     b = &sw_breakpoints[i];
-    if (b->busy) {
-      ret = aarch64_breakpoint(&c->a64, c->debug, remove, false, b);
-      if (ret)
-        return ret;
-    }
+    if (!b->busy)
+      continue;
+
+    ret = aarch64_breakpoint(&c->a64, c->debug, remove, false, b);
+    if (ret)
+      return ret;
   }
   return 0;
 }
@@ -53,10 +54,16 @@ static int target_core_exec(struct target_core *c, const uint32_t *const instr,
   return aarch64_exec(&c->a64, c->debug, instr, count);
 }
 
-int target_core_check_halted(struct target_core *c,
+static void target_core_get_halt_reason(struct target_core *c,
+  const char **str)
+{
+  aarch64_get_halt_reason(&c->a64, str);
+}
+
+static int target_core_check_halted(struct target_core *c,
   struct breakpoint *sw_breakpoints, int num_breakpoints)
 {
-  int ret = aarch64_check_halted(&c->a64, c->debug);
+  int ret = aarch64_check_halted(&c->a64, c->debug, c->cti);
   if (ret)
     return ret;
 
@@ -64,19 +71,36 @@ int target_core_check_halted(struct target_core *c,
 
   ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
     true);
+
   if (ret)
     return ret;
 
   return aarch64_fetch_context(&c->a64, c->debug);
 }
 
+static int target_core_step(struct target_core *c,
+  struct breakpoint *sw_breakpoints, int num_breakpoints);
+
 int target_core_resume(struct target_core *c,
   struct breakpoint *sw_breakpoints, int num_breakpoints)
 {
   int ret;
+  struct breakpoint *b;
+  int i;
 
   if (!c->halted)
     return -EINVAL;
+
+  for (i = 0; i < num_breakpoints; ++i) {
+    b = &sw_breakpoints[i];
+    if (!b->busy)
+      continue;
+    if (b->addr == c->a64.ctx.pc) {
+      ret = target_core_step(c, sw_breakpoints, num_breakpoints);
+      if (ret)
+        return ret;
+    }
+  }
 
   ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
     false);
@@ -94,18 +118,13 @@ int target_core_resume(struct target_core *c,
   return ret;
 }
 
-int target_core_step(struct target_core *c, struct breakpoint *sw_breakpoints,
-  int num_breakpoints)
+static int target_core_step(struct target_core *c,
+  struct breakpoint *sw_breakpoints, int num_breakpoints)
 {
   int ret;
 
   if (!c->halted)
     return -EINVAL;
-
-  ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
-    false);
-  if (ret)
-    return ret;
 
   ret = aarch64_restore_before_resume(&c->a64, c->debug);
   if (ret)
@@ -115,16 +134,7 @@ int target_core_step(struct target_core *c, struct breakpoint *sw_breakpoints,
   if (ret)
     return ret;
 
-  ret = aarch64_fetch_context(&c->a64, c->debug);
-  if (ret)
-    return ret;
-
-  ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
-    true);
-  if (ret)
-    return ret;
-
-  return ret;
+  return aarch64_fetch_context(&c->a64, c->debug);
 }
 
 int target_core_breakpoint(struct target_core *c, bool remove, bool hardware,
@@ -507,4 +517,9 @@ int target_mem_read_fast_next(struct target *t, uint32_t *value)
 int target_mem_read_fast_stop(struct target *t)
 {
   return target_core_mem_read_fast_stop(&t->core[0]);
+}
+
+void target_get_halt_reason(struct target *t, const char **str)
+{
+  target_core_get_halt_reason(&t->core[0], str);
 }

@@ -58,3 +58,4 @@ int target_exec(struct target *t, const uint32_t *instr, int count);
 int target_mem_read_fast_start(struct target *t, uint64_t addr);
 int target_mem_read_fast_next(struct target *t, uint32_t *value);
 int target_mem_read_fast_stop(struct target *t);
+void target_get_halt_reason(struct target *t, const char **str);

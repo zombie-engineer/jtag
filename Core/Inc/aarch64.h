@@ -54,6 +54,18 @@
 #define AARCH64_CORE_REG_VBAR_EL1   44
 #define AARCH64_CORE_REG_UNKNOWN 0xffff
 
+typedef enum {
+  /* Failed to establish halt reason  */
+  AARCH64_HALT_REASON_UNKNOWN = 0,
+  /* Halted due to request from extenal debugger */
+  AARCH64_HALT_REASON_EXTERNAL_SIGNAL = 1,
+  /* Halted due to step */
+  AARCH64_HALT_REASON_HALT_STEP = 2,
+  /* Halted due to cpu executed 'HLT' instruction */
+  AARCH64_HALT_REASON_SW_HLT_INSTR = 3
+} aarch64_halt_reason_t;
+
+
 struct adiv5_dap;
 
 struct aarch64_context {
@@ -103,8 +115,9 @@ struct aarch64 {
   struct adiv5_dap *dap;
   struct aarch64_dbg_regs_cache regs;
   struct aarch64_context ctx;
-  int cache_line_width_inst;
-  int cache_line_width_data;
+  int dcache_line_sz;
+  int icache_line_sz;
+  aarch64_halt_reason_t halt_reason;
 };
 
 int aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
@@ -165,3 +178,4 @@ int aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
 
 int aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr);
 
+void aarch64_get_halt_reason(struct aarch64 *a, const char **str);

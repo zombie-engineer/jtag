@@ -56,6 +56,25 @@
 #define AARCH64_BRK(__im) (0xd4200000 | ((__im & 0xffff) << 5))
 #define AARCH64_HLT(__im) (0xd4400000 | ((__im & 0xffff) << 5))
 
+#define OPCODE_DC_CIVAC_X0 0xd50b7e20
+#define OPCODE_DSB_ISH     0xd5033b9f
+#define OPCODE_IC_IVAU_X0  0xd50b7520
+#define OPCODE_ISB         0xd5033fdf
+
+static inline void aarch64_update_halt_reason(struct aarch64 *a)
+{
+  int status = aarch64_edscr_get_status(a->regs.edscr);
+
+  if (status == EDSCR_STATUS_EXT_DEBUG_REQ)
+    a->halt_reason = AARCH64_HALT_REASON_EXTERNAL_SIGNAL;
+  else if (status == EDSCR_STATUS_HLT_INSTR)
+    a->halt_reason = AARCH64_HALT_REASON_SW_HLT_INSTR;
+  else if (status == EDSCR_STATUS_HLT_STEP_NORM)
+    a->halt_reason = AARCH64_HALT_REASON_HALT_STEP;
+  else
+    a->halt_reason = AARCH64_HALT_REASON_UNKNOWN;
+}
+
 static inline int
 __attribute__((unused))
 aarch64_read_sampled_pc(struct aarch64 *a, uint32_t baseaddr)
@@ -197,8 +216,20 @@ static int aarch64_on_debug_entry(struct aarch64 *a, uint32_t baseaddr,
     return ret;
 
   cti_ack2(a->dap, cti_baseaddr, CTI_EVENT_HALT);
-
+  aarch64_update_halt_reason(a);
   return 0;
+}
+
+void aarch64_get_halt_reason(struct aarch64 *a, const char **out)
+{
+  if (a->halt_reason == AARCH64_HALT_REASON_EXTERNAL_SIGNAL)
+    *out = "Debug request";
+  else if (a->halt_reason == AARCH64_HALT_REASON_SW_HLT_INSTR)
+    *out = "HLT instruction";
+  else if (a->halt_reason == AARCH64_HALT_REASON_HALT_STEP)
+    *out = "HALT step";
+  else
+    *out = "UNKNOWN";
 }
 
 int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr,
@@ -226,18 +257,22 @@ int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr,
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDPRSR,
     &a->regs.edprsr);
 
-  if (aarch64_edprsr_is_halted(a->regs.edprsr))
-    ret = 0;
+  ret = aarch64_edprsr_is_halted(a->regs.edprsr) ? 0 : -EAGAIN;
 
   status = aarch64_edscr_get_status(a->regs.edscr);
   if (status == EDSCR_STATUS_EXCEPT_CATCH)
     return -EINTR;
 
-  return aarch64_on_debug_entry(a, baseaddr, cti_baseaddr);
+  if (!ret)
+    ret = aarch64_on_debug_entry(a, baseaddr, cti_baseaddr);
+
+  return ret;
 }
 
 int aarch64_halt(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
 {
+  int ret;
+
   if (!aarch64_set_mod_reg_bits(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
     &a->regs.edscr, 1<<EDSCR_HDE, 1<<EDSCR_HDE))
     return -EIO;
@@ -251,7 +286,9 @@ int aarch64_halt(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
       &a->regs.edprsr);
   } while (!aarch64_edprsr_is_halted(a->regs.edprsr));
 
-  return aarch64_check_handle_sticky_error(a, baseaddr);
+  ret = aarch64_check_handle_sticky_error(a, baseaddr);
+  aarch64_update_halt_reason(a);
+  return ret;
 }
 
 static inline bool aarch64_ctx_get_reg(struct aarch64_context *ctx,
@@ -426,6 +463,8 @@ int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
   if (ret)
     return ret;
 
+  aarch64_update_halt_reason(a);
+
   return aarch64_check_handle_sticky_error(a, baseaddr);
 }
 
@@ -438,8 +477,8 @@ static int aarch64_get_cache_info(struct aarch64 *a, uint32_t baseaddr)
   if (ret)
     return ret;
 
-  a->cache_line_width_inst = 4ul << (ctr_el0 & 0xf);
-  a->cache_line_width_data = 4ul << ((ctr_el0 >> 16) & 0xf);
+  a->icache_line_sz = 4ul << (ctr_el0 & 0xf);
+  a->dcache_line_sz = 4ul << ((ctr_el0 >> 16) & 0xf);
 
   ret = aarch64_read_core_reg(a, baseaddr, AARCH64_CORE_REG_CLIDR_EL1,
     &clidr_el1);
@@ -454,12 +493,13 @@ static int aarch64_get_cache_info(struct aarch64 *a, uint32_t baseaddr)
   return 0;
 }
 
+#if 0
 static int aarch64_cache_flush_invalidate_flush(struct aarch64 *a,
   uint32_t baseaddr, uint64_t start_addr, uint64_t end_addr)
 {
   int ret = 0;
-  const uint32_t opcode_dc_civac = 0xd50b7e20;
-  uint64_t addr_mask = ~(uint64_t)(a->cache_line_width_inst - 1);
+  const uint32_t opcode_dc_civac_x0 = OPCODE_DC_CIVAC_X0;
+  uint64_t addr_mask = ~(uint64_t)(a->icache_line_sz - 1);
   uint64_t cache_line_addr = start_addr & addr_mask;
 
   if (!aarch64_set_normal_mode(a, baseaddr))
@@ -472,68 +512,116 @@ static int aarch64_cache_flush_invalidate_flush(struct aarch64 *a,
     if (ret)
       return ret;
 
-    ret = aarch64_exec(a, baseaddr, &opcode_dc_civac, 1);
+    ret = aarch64_exec(a, baseaddr, &opcode_dc_civac_x0, 1);
     if (ret)
       return ret;
 
-    cache_line_addr += a->cache_line_width_inst;
+    cache_line_addr += a->icache_line_sz;
   }
   return ret;
 }
+#endif
 
-static int aarch64_breakpoint_sw(struct aarch64 *a, uint32_t baseaddr,
-  struct breakpoint *b, bool remove)
+static int aarch64_breakpoint_sw_cache_sync(struct aarch64 *a,
+  uint32_t baseaddr, uint64_t addr)
 {
   int ret;
-  uint32_t instr;
+
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return -EIO;
+
+  uint32_t dc_civac_x0 = OPCODE_DC_CIVAC_X0;
+
+  const uint32_t icache_sync[] = {
+    /* Enforces order (not sure if this is required in debug */
+    OPCODE_DSB_ISH,
+    /* Reset instruction cache */
+    OPCODE_IC_IVAU_X0,
+    /* Enforces order (not sure if this is required in debug */
+    OPCODE_DSB_ISH,
+    /* Resets instruction pipeline */
+    OPCODE_ISB
+  };
+
+  if (!a->ctx.mmu_on)
+    return 0;
+
+  /* Only required if MMU is enabled, so caches are enabled as well */
+  /* NOTE: Need to check, maybe ISB ISH are needed if MMU is not enable */
+  const uint64_t dcache_addr_mask = ~(uint64_t)(a->dcache_line_sz - 1);
+  const uint64_t icache_addr_mask = ~(uint64_t)(a->icache_line_sz - 1);
+  const uint64_t dcache_line_addr = addr & dcache_addr_mask;
+  const uint64_t icache_line_addr = addr & icache_addr_mask;
+
+  /*
+   * instruction bytes were written to cached memory, so they are in DATA cache
+   * now cache, not in INSTRUCTION cache, so we first have to flush them to
+   * system memory, then we need to invalidate instruction cache
+   */
+
+  /* X0 = D-cache line address for instruction address */
+  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0,
+    dcache_line_addr);
+  if (ret)
+    return ret;
+
+  /* Write instruction from DATA cache to physical memory */
+  ret = aarch64_exec(a, baseaddr, &dc_civac_x0, 1);
+  if (ret)
+    return ret;
+
+  /* X0 = I-cache line address for instruction address */
+  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0,
+    icache_line_addr);
+  if (ret)
+    return ret;
+
+  /* Synchronize order, reset I-cache and reset instruction pipeline */
+  return aarch64_exec(a, baseaddr, icache_sync, ARRAY_SIZE(icache_sync));
+}
+
+static int aarch64_breakpoint_sw(struct aarch64 *a, uint32_t baseaddr,
+  struct breakpoint *b, bool restore)
+{
+  int ret;
   uint32_t test_instr;
+  uint32_t instr;
 
   if (b->addr & 3ul)
     return -EINVAL;
 
-  if (!remove) {
+
+  if (!restore) {
     /*
      * We are inserting breakpoint, load previous instruction, which we are
      * overwriting to restore it next time.
      */
-    if (a->ctx.mmu_on) {
-      ret = aarch64_cache_flush_invalidate_flush(a, baseaddr, b->addr,
-        b->addr + 4);
-      if (ret)
-        return ret;
-    }
-
     ret = aarch64_read_mem_once(a, baseaddr, MEM_ACCESS_SIZE_32, b->addr,
       &b->instr);
     if (ret)
       return ret;
+
     instr = AARCH64_HLT(11);
   }
-  else {
+  else
     instr = b->instr;
-  }
 
   ret = aarch64_write_mem32_once(a, baseaddr, b->addr, instr);
   if (ret)
     return ret;
 
+  ret = aarch64_breakpoint_sw_cache_sync(a, baseaddr, b->addr);
+  if (ret)
+    return ret;
+
+  /* test */
   ret = aarch64_read_mem_once(a, baseaddr, MEM_ACCESS_SIZE_32, b->addr,
     &test_instr);
   if (ret)
     return ret;
 
-  if (test_instr != instr) {
+  if (test_instr != instr)
     return -16;
-  }
-
-#if 0
-  if (a->ctx.mmu_on) {
-    ret = aarch64_cache_flush_invalidate_flush(a, baseaddr, b->addr,
-      b->addr + 4);
-    if (ret)
-      return ret;
-  }
-#endif
 
   return ret;
 }

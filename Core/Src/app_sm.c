@@ -743,9 +743,12 @@ void app_sm_process_next_cmd(void)
         msg("not attached\r\n");
         ret = -EINVAL;
       }
-      else if (target_is_halted(&t))
+      else if (target_is_halted(&t)) {
+        const char *halt_reason = NULL;
+        target_get_halt_reason(&t, &halt_reason);
+        msg("halt_reason: %s\r\n", halt_reason);
         ret = 0;
-      else {
+      } else {
         ret = target_check_halted(&t);
       }
       break;
