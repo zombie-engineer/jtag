@@ -51,6 +51,9 @@ def to_hex(data: bytes) -> str:
 def from_hex(s: str) -> bytes:
   return binascii.unhexlify(s.encode())
 
+def to_word_aligned(val, word_size):
+  return int((val + word_size - 1) / word_size) * word_size
+
 
 
 class JTAGBackend:
@@ -154,45 +157,34 @@ class JTAGBackend:
 
   def read_mem(self, addr: int, length: int) -> Optional[bytes]:
     print(f'read mem: addr 0x{addr:016x}, length:{length}')
-    word_size = 8
-    if length == 0:
+    if not length:
       return b''
-    if length == 4:
-      word_size = 4
-    if word_size == 8:
-      addrmask = 0xfffffffffffffff8
-    elif word_size == 4:
+
+    if length <= 4:
+      wordsize = 4
       addrmask = 0xfffffffffffffffc
-
-    # Example:
-    # addr:    0xffff000000378dc4, size = 4, skip bytes = 4, 
-    # addrmsk  0xfffffffffffffff8
-    # addrmsk  0xffff000000378dc0, skip_bytes = 4, total size = 8
-    # count = 8 / 8 = 1
-    # extra_bytes = 8 * 1- 8
-
-    aligned_addr = addr & addrmask
-    skip_bytes = addr - aligned_addr
-    read_length = skip_bytes + length
-    count = max(int(read_length / word_size), 1)
-    extra_bytes = count * word_size - read_length
-    if word_size == 4:
-      values = self.__t.mem_read32(aligned_addr, count)
-    elif word_size == 8:
-      values = self.__t.mem_read64(aligned_addr, count)
+      read_words_fn = self.__t.mem_read32
     else:
-      raise Exception(f'unsupported word size {word_size}')
+      wordsize = 8
+      addrmask = 0xfffffffffffffff8
+      read_words_fn = self.__t.mem_read64
+
+    addr_aligned = addr & addrmask
+    head_skip = addr - addr_aligned
+    read_length = head_skip + length
+    read_length_aligned = to_word_aligned(read_length, wordsize)
+    num_words = int(read_length_aligned / wordsize)
+    tail_skip = num_words * wordsize - read_length
+    values = read_words_fn(addr_aligned, num_words)
 
     result = bytearray()
     for i in values:
-      tmp = i.to_bytes(word_size, 'little')
+      tmp = i.to_bytes(wordsize, 'little')
       result.extend(tmp)
 
-    if extra_bytes:
-      result = result[:-extra_bytes]
-    if skip_bytes:
-      result = result[skip_bytes:]
-    return result
+    if tail_skip:
+      result = result[:-tail_skip]
+    return result[head_skip:]
 
   def write_mem(self, addr: int, data: bytes) -> bool:
     print(f'write_mem: {addr:016x}, data:{data}')

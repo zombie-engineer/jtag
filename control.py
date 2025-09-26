@@ -263,8 +263,10 @@ class Target:
       print(f'Mem read cmd failed, err:{err}, details:{lines}')
       return []
 
-    if len(lines) and lines[0] == cmd:
-      lines.pop(0)
+    print('__mem_read result:', lines)
+    assert len(lines)
+    assert lines[0] == cmd
+    lines.pop(0)
 
     return [int(i, base=0) for i in lines]
 

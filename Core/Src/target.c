@@ -69,13 +69,12 @@ static int target_core_check_halted(struct target_core *c,
 
   c->halted = true;
 
-  ret = target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
-    true);
-
+  ret = aarch64_fetch_context(&c->a64, c->debug);
   if (ret)
     return ret;
 
-  return aarch64_fetch_context(&c->a64, c->debug);
+  return target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
+    true);
 }
 
 static int target_core_step(struct target_core *c,
@@ -122,6 +121,7 @@ static int target_core_step(struct target_core *c,
   struct breakpoint *sw_breakpoints, int num_breakpoints)
 {
   int ret;
+  uint64_t x1;
 
   if (!c->halted)
     return -EINVAL;
@@ -340,7 +340,7 @@ static int target_core_mem_read(struct target_core *c,
   if (ret)
     return ret;
 
-  return aarch64_read_mem32_fast_next(&c->a64, c->debug, (uint32_t *)&value);
+  return 0;
 }
 
 int target_core_mem_read_fast_start(struct target_core *c, uint64_t addr)
@@ -400,7 +400,7 @@ int target_core_reg_read64(struct target_core *c, uint32_t reg_id,
     return -EPIPE;
 
   if (direct)
-    return aarch64_read_core_reg(&c->a64, c->debug, reg_id, out);
+    return aarch64_reg_read_64(&c->a64, c->debug, reg_id, out);
 
   return aarch64_read_cached_reg(&c->a64, c->debug, reg_id, out);
 }

@@ -62,7 +62,9 @@ typedef enum {
   /* Halted due to step */
   AARCH64_HALT_REASON_HALT_STEP = 2,
   /* Halted due to cpu executed 'HLT' instruction */
-  AARCH64_HALT_REASON_SW_HLT_INSTR = 3
+  AARCH64_HALT_REASON_SW_HLT_INSTR = 3,
+  /* Halted due to step */
+  AARCH64_HALT_REASON_HALT_STEP_NO_SYNDROME = 4,
 } aarch64_halt_reason_t;
 
 
@@ -159,13 +161,14 @@ int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t value);
 
 int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t reg_id, uint64_t value);
+  uint32_t reg_id, uint64_t value, bool make_dirty);
 int aarch64_read_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *value);
 int aarch64_write_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value);
-int aarch64_read_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t reg_id, uint64_t *out);
+
+int aarch64_reg_read_64(struct aarch64 *a, uint32_t baseaddr, uint32_t reg_id,
+  uint64_t *out);
 
 int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
   mem_access_size_t access_size, uint64_t addr, void *out_value);
