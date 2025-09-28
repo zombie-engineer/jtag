@@ -2,64 +2,11 @@
 #include "adiv5.h"
 #include "cmsis_edi.h"
 #include "arm_cti.h"
+#include "aarch64_opcode.h"
 #include "aarch64_edprsr.h"
 #include "aarch64_edscr.h"
 #include "common.h"
 #include <errno.h>
-
-/*
- * 4-byte Aarch64 instruction that MOVes contents of register Xn to
- * DBGDTR_EL0, with 'n' - being register index from 0 to 30,
- * x0, x1, x2, ..., x30
- * DBGDTR_EL0 is a system register, accessible from software that is
- * mapped to external debug registers DBGDTRTX_EL0 and DBGDTRRX_EL0 like that:
- * DBGDTRTX_EL0[31:0] <- DBGDTR_EL0[31:0]
- * DBGDTRRX_EL0[31:0] <- DBGDTR_EL0[63:32]
- */
-#define AARCH64_INSTR_MSR_DBGDTR_EL0(__r) (0xd5130400 | (__r & 0x1f))
-#define AARCH64_INSTR_MRS_DBGDTR_EL0(__r) (0xd5330400 | (__r & 0x1f))
-#define op0 19
-#define op1 16
-#define CRn 12
-#define CRm 8
-#define op2 5
-
-#define MRSMSR_SYSREG(_op0, _op1, _CRn, _CRm, _op2) \
-      (_op0 << op0) \
-    | (_op1 << op1) \
-    | (_CRn << CRn) \
-    | (_CRm << CRm) \
-    | (_op2 << op2) \
-
-#define DBGDTR_EL0 MRSMSR_SYSREG(0b10, 0b011,      0, 0b0100,     0)
-#define DLR_EL0    MRSMSR_SYSREG(0b11, 0b011, 0b0100, 0b0101, 0b001)
-#define X0         0
-#define CTR_EL0    MRSMSR_SYSREG(0b11, 0b011, 0b0000, 0b0000, 0b001)
-#define CLIDR_EL1  MRSMSR_SYSREG(0b11, 0b001, 0b0000, 0b0000, 0b001)
-#define CSSELR_EL1 MRSMSR_SYSREG(0b11, 0b010, 0b0000, 0b0000, 0b000)
-#define VBAR_EL1   MRSMSR_SYSREG(0b11, 0b000, 0b1100, 0b0000, 0b000)
-/* d538c000 */
-
-#define AARCH64_I_MSR(__dstreg, __srcreg) \
-  (0xd5100000 | __dstreg | (__srcreg & 0x1f))
-
-#define AARCH64_I_MRS(__dstreg, __srcreg) \
-  (0xd5300000 | __srcreg | (__dstreg & 0x1f))
-
-/* 0xb8404401 */
-#define AARCH64_LDR_POSTINC_32(__addrreg, __dstreg) \
-  (0xb8400400 | ((4 & 0x1ff) << 12) | (__addrreg << 5) | __dstreg)
-
-#define AARCH64_LDR_POSTINC_64(__addrreg, __dstreg) \
-  (0xf8400400 | ((8 & 0x1ff) << 12) | (__addrreg << 5) | __dstreg)
-
-#define AARCH64_BRK(__im) (0xd4200000 | ((__im & 0xffff) << 5))
-#define AARCH64_HLT(__im) (0xd4400000 | ((__im & 0xffff) << 5))
-
-#define OPCODE_DC_CIVAC_X0 0xd50b7e20
-#define OPCODE_DSB_ISH     0xd5033b9f
-#define OPCODE_IC_IVAU_X0  0xd50b7520
-#define OPCODE_ISB         0xd5033fdf
 
 static inline void aarch64_update_halt_reason(struct aarch64 *a)
 {
@@ -657,43 +604,6 @@ int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
   return aarch64_breakpoint_sw(a, baseaddr, b, remove);
 }
 
-static bool aarch64_get_mrs_opcode(uint32_t *opcode, uint32_t reg_id)
-{
-#define MRS_X0_DLR_EL0 AARCH64_I_MRS(X0, DLR_EL0)
-#define MOV_X0_SP         0x910003e0
-#define MRS_X0_SCTLR_EL1  0xd5381000
-#define MRS_X0_ESR_EL2    0xd53c5200
-#define MRS_X0_FAR_EL2    0xd53c6000
-#define MRS_X0_DISR_EL1   0xd538c120
-#define MRS_X0_DSPSR_EL0  0xd53b4500
-#define MRS_X0_FPSR_EL0   0xd53b4420
-#define MRS_X0_FPCR_EL0   0xd53b4400
-#define MRS_X0_CTR_EL0    AARCH64_I_MRS(X0, CTR_EL0)
-#define MRS_X0_VBAR_EL1   AARCH64_I_MRS(X0, VBAR_EL1)
-#define MRS_X0_CLIDR_EL1  AARCH64_I_MRS(X0, CLIDR_EL1)
-#define MRS_X0_CSSELR_EL1 AARCH64_I_MRS(X0, CSSELR_EL1)
-
-  switch (reg_id) {
-    case AARCH64_CORE_REG_PC        : *opcode = MRS_X0_DLR_EL0  ; break;
-    case AARCH64_CORE_REG_SP        : *opcode = MOV_X0_SP       ; break;
-    case AARCH64_CORE_REG_SCTLR_EL1 : *opcode = MRS_X0_SCTLR_EL1; break;
-    case AARCH64_CORE_REG_ESR_EL2   : *opcode = MRS_X0_ESR_EL2  ; break;
-    case AARCH64_CORE_REG_FAR_EL2   : *opcode = MRS_X0_FAR_EL2  ; break;
-    case AARCH64_CORE_REG_DISR_EL1  : *opcode = MRS_X0_DISR_EL1 ; break;
-    /* PSTATE */
-    case AARCH64_CORE_REG_DSPSR_EL0 : *opcode = MRS_X0_DSPSR_EL0; break;
-    case AARCH64_CORE_REG_CPSR      : *opcode = MRS_X0_DSPSR_EL0; break;
-    case AARCH64_CORE_REG_FPSR      : *opcode = MRS_X0_FPSR_EL0 ; break;
-    case AARCH64_CORE_REG_FPCR      : *opcode = MRS_X0_FPCR_EL0 ; break;
-    case AARCH64_CORE_REG_CTR_EL0   : *opcode = MRS_X0_CTR_EL0  ; break;
-    case AARCH64_CORE_REG_VBAR_EL1  : *opcode = MRS_X0_VBAR_EL1 ; break;
-    case AARCH64_CORE_REG_CLIDR_EL1 : *opcode = MRS_X0_CLIDR_EL1; break;
-    case AARCH64_CORE_REG_CSSELR_EL1: *opcode = MRS_X0_CSSELR_EL1; break;
-    default: return false;
-  }
-  return true;
-}
-
 int aarch64_reg_read_64(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
   uint64_t *out_reg)
 {
@@ -938,34 +848,33 @@ int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
   return 0;
 }
 
-int aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
-  uint64_t addr)
+int aarch64_mem_read_fast(struct aarch64 *a, uint32_t baseaddr,
+  mem_access_size_t access_size, uint64_t addr, size_t count,
+  void (*cb)(uint64_t, mem_access_size_t))
 {
   int ret;
-  uint32_t tmp;
+  uint64_t value;
+  uint32_t *ptr;
+
   if (!aarch64_set_normal_mode(a, baseaddr))
     return -EIO;
 
+  /* Set starting address to X0 */
   ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr, true);
   if (ret)
     return ret;
 
+#if 1
   adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
     AARCH64_I_MSR(DBGDTR_EL0, X0));
 
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
     &a->regs.edscr);
+#endif
 
   if (!aarch64_set_memory_mode(a, baseaddr))
     return -1;
 
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, &tmp);
-  return 0;
-}
-
-int aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t *value)
-{
   /*
    * Arm Architecture Reference Manual for A-profile architecture
    * The Debug Communication Channel and Instruction Transfer Register
@@ -976,17 +885,57 @@ int aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
    * 3. Equivalent to MSR DBGDTRTX_EL0, X1
    * 4. EDSCR.TXfull,ITE to be set to {1,1} and X1, R1 to be set to UNKNOWN
    */
+
+  /*
+   * First read from DBGDTRTX_EL0 returns older value but will also trigger:
+   * LDR W1, [X0], #4
+   * MSR DBGDTRTX_EL0, X1
+   * Which will set DBGDTRTX_EL0 with first 4 bytes of addr
+   */
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
+    (uint32_t *)&value);
+
   a->ctx.dirty_mask |= 1ull << AARCH64_CORE_REG_X0;
   a->ctx.dirty_mask |= 1ull << AARCH64_CORE_REG_X1;
 
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
-      value);
-  return 0;
-}
+  /*
+   * Next read from DBGDTRTX_EL0 will trigger first 4 bytes and then next 4
+   * bytes, etc.
+   * 2 Details:
+   * For 64 bit reads we will have to go in pairs of 2x 32bit reads
+   * For the last 4 byte read we don't want to be in memory mode because we
+   * don't want to fill DBGDTRTX_EL0 with next memory value. First this would
+   * generate 1 extra memory access that the user has not requested
+   * Second, this will fill DBGDTRTX_EL0 with new value that will be received
+   * by next reader of this register, this causes some nasty bugs
+   */
+  for (int i = 0; i < count - 1; ++i) {
+    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
+      (uint32_t *)&value);
+    if (access_size == MEM_ACCESS_SIZE_64) {
+      adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
+        ((uint32_t *)&value) + 1);
+    }
+    cb(value, access_size);
+  }
 
-int aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr)
-{
-  return aarch64_set_normal_mode(a, baseaddr) ? 0 : -1;
+  ptr = (uint32_t *)&value;
+
+  if (access_size == MEM_ACCESS_SIZE_64)
+    adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
+      ptr++);
+
+  if (!aarch64_set_normal_mode(a, baseaddr))
+    return -1;
+
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0, ptr);
+
+  cb(value, access_size);
+
+  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
+    &a->regs.edscr);
+
+  return 0;
 }
 
 int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,

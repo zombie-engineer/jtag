@@ -173,12 +173,8 @@ int aarch64_reg_read_64(struct aarch64 *a, uint32_t baseaddr, uint32_t reg_id,
 int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
   mem_access_size_t access_size, uint64_t addr, void *out_value);
 
-int aarch64_read_mem32_fast_start(struct aarch64 *a, uint32_t baseaddr,
-  uint64_t addr);
-
-int aarch64_read_mem32_fast_next(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t *value);
-
-int aarch64_read_mem32_fast_stop(struct aarch64 *a, uint32_t baseaddr);
+int aarch64_mem_read_fast(struct aarch64 *a, uint32_t baseaddr,
+  mem_access_size_t access_size, uint64_t addr, size_t count,
+  void (*cb)(uint64_t, mem_access_size_t));
 
 void aarch64_get_halt_reason(struct aarch64 *a, const char **str);

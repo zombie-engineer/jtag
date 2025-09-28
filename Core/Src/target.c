@@ -121,7 +121,6 @@ static int target_core_step(struct target_core *c,
   struct breakpoint *sw_breakpoints, int num_breakpoints)
 {
   int ret;
-  uint64_t x1;
 
   if (!c->halted)
     return -EINVAL;
@@ -298,7 +297,6 @@ static int target_core_mem_read(struct target_core *c,
   mem_access_size_t access_size, uint64_t addr, size_t count,
   void (*cb)(uint64_t, mem_access_size_t))
 {
-  size_t i;
   int ret;
   uint64_t value;
 
@@ -318,53 +316,8 @@ static int target_core_mem_read(struct target_core *c,
   if (access_size != MEM_ACCESS_SIZE_32 && access_size != MEM_ACCESS_SIZE_64)
     return -ENOTSUP;
 
-  ret = aarch64_read_mem32_fast_start(&c->a64, c->debug, addr);
-  if (ret)
-    return ret;
-
-  for (i = 0; i < count; ++i) {
-    ret = aarch64_read_mem32_fast_next(&c->a64, c->debug, (uint32_t *)&value);
-    if (ret)
-      return ret;
-
-    if (access_size == MEM_ACCESS_SIZE_64) {
-      ret = aarch64_read_mem32_fast_next(&c->a64, c->debug,
-        ((uint32_t *)&value) + 1);
-      if (ret)
-        return ret;
-    }
-    cb(value, access_size);
-  }
-
-  ret = aarch64_read_mem32_fast_stop(&c->a64, c->debug);
-  if (ret)
-    return ret;
-
-  return 0;
-}
-
-int target_core_mem_read_fast_start(struct target_core *c, uint64_t addr)
-{
-  if (!c->halted)
-    return -EPIPE;
-
-  return aarch64_read_mem32_fast_start(&c->a64, c->debug, addr);
-}
-
-int target_core_mem_read_fast_next(struct target_core *c, uint32_t *value)
-{
-  if (!c->halted)
-    return -EPIPE;
-
-  return aarch64_read_mem32_fast_next(&c->a64, c->debug, value);
-}
-
-int target_core_mem_read_fast_stop(struct target_core *c)
-{
-  if (!c->halted)
-    return -EPIPE;
-
-  return aarch64_read_mem32_fast_stop(&c->a64, c->debug);
+  return aarch64_mem_read_fast(&c->a64, c->debug, access_size, addr, count,
+    cb);
 }
 
 static int target_core_mem_write(struct target_core *c,
@@ -502,21 +455,6 @@ int target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out,
   bool direct)
 {
   return target_core_reg_read64(&t->core[0], reg_id, out, direct);
-}
-
-int target_mem_read_fast_start(struct target *t, uint64_t addr)
-{
-  return target_core_mem_read_fast_start(&t->core[0], addr);
-}
-
-int target_mem_read_fast_next(struct target *t, uint32_t *value)
-{
-  return target_core_mem_read_fast_next(&t->core[0], value);
-}
-
-int target_mem_read_fast_stop(struct target *t)
-{
-  return target_core_mem_read_fast_stop(&t->core[0]);
 }
 
 void target_get_halt_reason(struct target *t, const char **str)
