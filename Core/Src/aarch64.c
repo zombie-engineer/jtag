@@ -864,13 +864,21 @@ int aarch64_mem_read_fast(struct aarch64 *a, uint32_t baseaddr,
   if (ret)
     return ret;
 
-#if 1
+  /*
+   * Prepare for external read from DBGDTRTX_EL0.
+   * We need to set TXfull to 1 before going into memory mode and trying to
+   * read, otherwise on read we will receive value 0xffff0000, and EDSCR.TXU
+   * (TX underrun bit) set to 1.
+   * Arm Architecture Reference Manual for A-profile architecture
+   * The Debug Communication Channel and Instruction Transfer Register
+   * H4.3 DCC and ITR access modes
+   * Read carefully:
+   * - H4.4.3 Overrun and underrun flags
+   * - Table H4-1 DCC and ITR ready flags and the associated overrun/underrun
+   *   flags
+   */
   adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
     AARCH64_I_MSR(DBGDTR_EL0, X0));
-
-  adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDSCR,
-    &a->regs.edscr);
-#endif
 
   if (!aarch64_set_memory_mode(a, baseaddr))
     return -1;
