@@ -1,3 +1,3 @@
 #!/bin/bash
 
-./gdbserver.py -v --serial /dev/ttyACM1
+./gdbserver.py -v --serial /dev/ttyJTAG
