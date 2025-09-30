@@ -3,9 +3,9 @@
 """
 Minimalistic GDB server proxy that is part of this scheme:
 gdb->[gdbserver.py]->control.py->stm32discovery JTAG firmware->Raspberry Pi
-over /dev/ttyACM* using a simple placeholder protocol.
+over /dev/ttyACM* using a simple protocol.
 
-Features implemented (stubbed where necessary):
+Features implemented:
 - TCP socket listener for GDB Remote Serial Protocol (RSP)
 - Packet framing, checksum verify, and acknowledgements (+/-)
 - Optional no-ack mode via QStartNoAckMode
@@ -15,12 +15,6 @@ Features implemented (stubbed where necessary):
 - Continue/step: c/s and vCont;c;s (bridged to backend)
 - Breakpoints: Z/z (types 0=swbp, 1=hwbp; others stubbed)
 - Interrupt (^C) mapping to backend.break
-
-Backend abstraction:
-- JTAGBackend: skeleton using pyserial to talk to /dev/ttyACM* with a placeholder ASCII
-  protocol. Replace send_cmd/parse_* with your real device protocol.
-
-This is a skeleton intended for you to fill in backend calls.
 """
 
 import socket
@@ -34,7 +28,11 @@ import control
 import logging
 from typing import Optional, Tuple, Dict
 import serial
+import re
 
+# AArch64 registers layout matches default one in gdb.
+# For greater details generation of target.xml should be supported by this
+# module
 AARCH64_NUM_REGS = 33
 AARCH64_REGSET_SIZE = AARCH64_NUM_REGS * 8
 
@@ -54,12 +52,7 @@ def from_hex(s: str) -> bytes:
 def to_word_aligned(val, word_size):
   return int((val + word_size - 1) / word_size) * word_size
 
-
-
 class JTAGBackend:
-  """Skeleton backend that speaks to a custom JTAG over /dev/ttyACM* using pyserial.
-  Replace send_cmd/parse_* bodies with your device's real protocol.
-  """
   def __init__(self, port: str = "/dev/ttyACM0", baud: int = 115200):
     self.__port = port
     self.__baud = baud
@@ -84,7 +77,7 @@ class JTAGBackend:
     self.ser.flush()
     return self.ser.readline().strip()
 
-  def continue_(self) -> None:
+  def resume(self) -> None:
     self.__t.resume()
 
   def step(self) -> None:
@@ -229,7 +222,6 @@ class RSPServer:
     self.no_ack_mode = False
     self.current_thread = 1
 
-  # -------------------- Packet framing & IO --------------------
   @staticmethod
   def _csum(data: bytes) -> int:
     return sum(data) % 256
@@ -262,50 +254,63 @@ class RSPServer:
   def send_signal(self, sig: int = 5):
     self.send_packet(f"S{sig:02x}")
 
-  def recv_packet(self) -> Optional[str]:
+  def on_break_request(self):
+    # Async break (Ctrl-C)
+    print('\x03 async break')
+    self.backend.interrupt()
+    # Report stop
+    self.send_signal(5)
+
+  def client_read_cmd_line(self):
+    # read until '#'
     data = bytearray()
     while True:
+      ch = self.conn.recv(1)
+      if ch == b"#":
+        break
+      data.extend(ch)
+    return data
+
+  def client_read_test_csum(self, data):
+    csum_bytes = self.conn.recv(2)
+    chksum = int(csum_bytes.decode(), 16)
+    return self._csum(bytes(data)) == chksum
+
+  def client_read_cmd(self):
+    data = self.client_read_cmd_line()
+    csum_ok = self.client_read_test_csum(data)
+    if not self.no_ack_mode:
+      self._send_raw(b'+' if csum_ok else b'-')
+    print('client_read_cmd', data, self.no_ack_mode, csum_ok)
+    return data.decode() if csum_ok else None
+
+  # Receive command packet from gdb. Returning None signals that client (gdb)
+  # has disconnected
+  def client_get_cmd(self) -> Optional[str]:
+    while True:
       b = self.conn.recv(1)
+      print('client_get_cmd', b)
       if not b:
         return None
-      # Async break (Ctrl-C)
-      if b == b"\x03":
-        print('\x03 async break')
-        # Interrupt request
-        try:
-          self.backend.interrupt()
-        except Exception:
-          pass
-        # Report stop
-        self.send_signal(5)
-        continue
-      if b == b"$":
-        data = bytearray()
-        # read until '#'
-        while True:
-          ch = self.conn.recv(1)
-          if ch == b"#":
-            break
-          data.extend(ch)
-        # read checksum
-        rx = self.conn.recv(2)
-        try:
-          rx_csum = int(rx.decode(), 16)
-        except Exception:
-          rx_csum = -1
-        calc = self._csum(bytes(data))
-        if rx_csum == calc:
-          if not self.no_ack_mode:
-            self._send_raw(b"+")
-          return data.decode()
-        else:
-          if not self.no_ack_mode:
-            self._send_raw(b"-")
-          # continue loop to read next packet
 
-  def on_breakpoint(self, pkt):
-    add = pkt[0] == 'Z'
-    body = pkt[1:]
+      if b == b"\x03":
+        # Special case of Ctrl+C on gdb side
+        self.on_break_request()
+        continue
+
+      if b != b'$':
+        continue
+
+      packet = self.client_read_cmd()
+      if packet is None:
+        continue
+
+      return packet
+
+  def on_breakpoint(self, cmd):
+    # Breakpoints Z/z type,addr,kind
+    add = cmd[0] == 'Z'
+    body = cmd[1:]
     type_s, addr_s, kind_s = body.split(",")
     btype = int(type_s, 10)
     addr = int('0x' + addr_s, 16)
@@ -319,7 +324,8 @@ class RSPServer:
       ok = False
     self.send_ok() if ok else self.send_error(1)
 
-  def on_memory_read(self, body):
+  def on_memory_read(self, cmd):
+    body = cmd[1:]
     # maddr,length
     addr_s, len_s = body.split(",")
     addr = int(addr_s, 16)
@@ -331,7 +337,27 @@ class RSPServer:
       print(f'error, data is {data}, len:{len(data)}, should_be:{length}')
       self.send_error(1)
 
-  def on_reg_access(self, body, read):
+  def on_memory_write(self, cmd):
+    body = cmd[1:]
+    # Maddr,length:data
+    # Example of a command: Mffff000000373628,8:ff00000000000000
+    addr_len, hexdata = body.split(":", 1)
+    addr_s, len_s = addr_len.split(",")
+    addr = int(addr_s, 16)
+    length = int(len_s, 16)
+    data = from_hex(hexdata)
+    ok = len(data) == length
+    if ok:
+      ok = self.backend.write_mem(addr, data)
+    if ok:
+      self.send_ok()
+    else:
+      self.send_error(1)
+
+
+  def on_reg_access(self, cmd):
+    read = cmd[0] == 'p'
+    body = cmd[1:]
     if not read:
       reg_id, value = body.split('=')
       reg_id = int('0x' + reg_id, 16)
@@ -350,151 +376,143 @@ class RSPServer:
     else:
       self.send_error(1)
 
-  def on_memory_write(self, body):
-    # Maddr,length:data
-    # Example of a command: Mffff000000373628,8:ff00000000000000
-    addr_len, hexdata = body.split(":", 1)
-    addr_s, len_s = addr_len.split(",")
-    addr = int(addr_s, 16)
-    length = int(len_s, 16)
-    data = from_hex(hexdata)
-    ok = len(data) == length
+  def on_q_supported(self, cmd):
+    print(cmd)
+    self.send_packet(';'.join([
+      "PacketSize=4000",
+      "swbreak+",
+      "hwbreak+",
+      "vContSupported+",
+      "QStartNoAckMode+"
+    ]))
+ 
+  def on_q_start_no_ack_mode(self, cmd):
+    self.no_ack_mode = True
+    self._send_raw(b"+")  # acknowledge the command itself
+    self.send_ok()
+
+  def on_v_must_reply_empty(self, cmd):
+    self.send_packet("")
+
+  def on_q_attached(self, cmd):
+    self.send_packet("1")
+
+  def q_xfer_features_read(self, cmd):
+    # Not serving target.xml; reply with 'l' (end of data)
+    self.send_packet("l")
+
+  def on_qf_thread_info(self, cmd):
+    tids = self.backend.list_threads()
+    if tids:
+      self.send_packet("m" + ",".join(str(t) for t in tids))
+    else:
+      self.send_packet("l")
+
+  def on_qs_thread_info(self, cmd):
+    self.send_packet("l")
+
+  def on_q_offsets(self, cmd):
+    self.send_packet('Text=0;Data=0;Bss=0')
+
+  def on_q_current_thread(self, cmd):
+    self.send_packet(f"QC{self.backend.current_thread():x}")
+
+  def on_q_thread_alive(self, cmd):
+    # Thread-alive query 'Txx'
+    self.send_packet("OK")
+
+  def on_set_current_thread(self, cmd):
+    # Set thread for step/continue or for reg access.
+    # Expect 'Hc{tid}' / 'Hg{tid}'
+    self.send_ok()
+
+  def on_q_stop_reason(self, cmd):
+    self.send_signal(5)
+
+  def on_read_all_regs(self, cmd):
+    raw = self.backend.read_all_registers()
+    self.send_packet(to_hex(raw))
+
+  def on_write_all_regs(self, cmd):
+    raw = from_hex(cmd[1:])
+    ok = len(raw) == AARCH64_REGSET_SIZE
     if ok:
-      ok = self.backend.write_mem(addr, data)
+      ok = self.backend.write_all_registers(raw)
+
     if ok:
       self.send_ok()
     else:
       self.send_error(1)
 
-  def on_q_supported(self):
-    # You can add more tokens as you implement them.
-    self.send_packet("PacketSize=4000;swbreak+;hwbreak+;vContSupported+;QStartNoAckMode+")
- 
-  def on_q_start_no_ack_mode(self):
-    self.no_ack_mode = True
-    self._send_raw(b"+")  # acknowledge the command itself
-    self.send_ok()
+  def on_v_cont_q(self, cmd):
+    self.send_packet("vCont;c;s")
 
-  def on_v_must_reply_empty(self):
-    self.send_packet("")
-
-  def on_q_attached(self):
-    self.send_packet("1")
-
-  def q_xfer_features_read(self):
-    # Not serving target.xml; reply with 'l' (end of data)
-    self.send_packet("l")
-
-  def handle(self, pkt: str):
-    # Queries first
-    if pkt.startswith("qSupported"):
-      return self.on_q_supported()
-    if pkt == "QStartNoAckMode":
-      return self.on_q_start_no_ack_mode()
-    if pkt.startswith("vMustReplyEmpty"):
-      return self.on_v_must_reply_empty()
-    if pkt == "qAttached":
-      return self.on_q_attached()
-    if pkt.startswith("qXfer:features:read"):
-      return self.q_xfer_features_read()
-    if pkt == "qfThreadInfo":
-      tids = self.backend.list_threads()
-      if tids:
-        self.send_packet("m" + ",".join(str(t) for t in tids))
-      else:
-        self.send_packet("l")
-      return
-    if pkt == "qsThreadInfo":
-      self.send_packet("l")
-      return
-    if pkt == 'qOffsets':
-      self.send_packet('Text=0;Data=0;Bss=0')
-      return
-    if pkt == "qC":
-      self.send_packet(f"QC{self.backend.current_thread():x}")
-      return
-    if pkt.startswith("T"):
-      # Thread-alive query 'Txx'
-      self.send_packet("OK")
-      return
-    if pkt.startswith("Hc") or pkt.startswith("Hg"):
-      # Set thread for step/continue or for reg access. Expect 'Hc{tid}' / 'Hg{tid}'
-      self.send_ok()
-      return
-    if pkt == "?":
-      self.send_signal(5)
-      return
-
-    # Registers
-    if pkt == "g":
-      raw = self.backend.read_all_registers()
-      self.send_packet(to_hex(raw))
-      return
-
-    if pkt.startswith("G"):
-      raw = from_hex(pkt[1:])
-      ok = len(raw) == AARCH64_REGSET_SIZE
-      if ok:
-        ok = self.backend.write_all_registers(raw)
-      if ok:
-        self.send_ok()
-      else:
-        self.send_error(1)
-      return
-
-    if pkt[0] in ['P', 'p']:
-      return self.on_reg_access(pkt[1:], pkt[0] == 'p')
-    if pkt.startswith("m"):
-      return self.on_memory_read(pkt[1:])
-
-    if pkt.startswith("M"):
-      return self.on_memory_write(pkt[1:])
-
-    # Breakpoints Z/z type,addr,kind
-    if pkt.startswith("Z") or pkt.startswith("z"):
-      return self.on_breakpoint(pkt)
-
-    # vCont
-    if pkt == "vCont?":
-      self.send_packet("vCont;c;s")
-      return
-    if pkt.startswith("vCont;"):
-      # Example formats: vCont;c or vCont;s or per-thread forms. We'll just handle global c/s.
-      if ";s" in pkt:
-        try:
-          self.backend.step()
-        except Exception:
-          pass
-        reason, sig = self.backend.wait_stop()
-        self.send_signal(sig or 5)
-      else:
-        try:
-          self.backend.continue_()
-        except Exception:
-          pass
-        reason, sig = self.backend.wait_stop()
-        self.send_signal(sig or 5)
-      return
-
-    # Classic continue/step
-    if pkt == "c":
-      try:
-        self.backend.continue_()
-      except Exception:
-        pass
-      reason, sig = self.backend.wait_stop()
-      self.send_signal(sig or 5)
-      return
-    if pkt == "s":
+  def on_v_cont(self, cmd):
+    # Example formats:
+    # vCont;c or vCont;s or per-thread forms. We'll just handle global c/s.
+    if ";s" in cmd:
       self.backend.step()
       reason, sig = self.backend.wait_stop()
       self.send_signal(sig or 5)
-      return
+    else:
+      self.backend.resume()
+      reason, sig = self.backend.wait_stop()
+      self.send_signal(sig or 5)
 
-    # Unknown -> empty response
+  def on_resume(self, cmd):
+    self.backend.resume()
+    reason, sig = self.backend.wait_stop()
+    self.send_signal(sig or 5)
+
+  def on_step(self, cmd):
+    self.backend.step()
+    reason, sig = self.backend.wait_stop()
+    self.send_signal(sig or 5)
+
+  def handle_cmd(self, cmd: str):
+    print(cmd)
+    dispatch_table = [
+      (r'^qSupported'         , self.on_q_supported),
+      (r'^QStartNoAckMode$'   , self.on_q_start_no_ack_mode),
+      (r'^vMustReplyEmpty'    , self.on_v_must_reply_empty),
+      (r'^qAttached$'         , self.on_q_attached),
+      (r'^qXfer:features:read', self.q_xfer_features_read),
+      (r'^qfThreadInfo$'      , self.on_qf_thread_info),
+      (r'^qsThreadInfo$'      , self.on_qs_thread_info),
+      (r'^qOffsets$'          , self.on_q_offsets),
+      (r'^qC$'                , self.on_q_current_thread),
+      (r'^T'                  , self.on_q_thread_alive),
+      (r'^H[cg]'              , self.on_set_current_thread),
+      (r'^\?$'                 , self.on_q_stop_reason),
+      (r'^g$'                 , self.on_read_all_regs),
+      (r'^G$'                 , self.on_write_all_regs),
+      (r'^[Pp]'               , self.on_reg_access),
+      (r'^m'                  , self.on_memory_read),
+      (r'^M'                  , self.on_memory_write),
+      (r'^[Zz]'               , self.on_breakpoint),
+      (r'^vCont?$'            , self.on_v_cont_q),
+      (r'^vCont;'             , self.on_v_cont),
+      (r'^c$'                 , self.on_resume),
+      (r'^s$'                 , self.on_step),
+    ]
+
+    for regex, handler in dispatch_table:
+      if re.match(regex, cmd):
+        handler(cmd)
+        return
+
+    # Handler not found, send empty packet
     self.send_packet("")
 
-  # ----------------------------- Server loop -----------------------------
+  def run_session_loop(self):
+    while True:
+      cmd = self.client_get_cmd()
+      if cmd is None:
+        print("[-] Disconnected")
+        return
+      print(f"[>] {cmd}")
+      self.handle_cmd(cmd)
+
 
   def serve(self):
     self.backend.connect()
@@ -506,14 +524,7 @@ class RSPServer:
       self.conn, self.addr = s.accept()
       print(f"[+] GDB connected from {self.addr}")
       with self.conn:
-        while True:
-          pkt = self.recv_packet()
-          if pkt is None:
-            print("[-] Disconnected")
-            break
-          # print for debugging
-          print(f"[>] {pkt}")
-          self.handle(pkt)
+        self.run_session_loop()
 
 
 def main():
