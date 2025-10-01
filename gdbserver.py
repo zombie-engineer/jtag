@@ -62,6 +62,9 @@ class JTAGBackend:
   def resume(self) -> None:
     self.__t.resume()
 
+  def reset(self) -> None:
+    self.__t.reset()
+
   def step(self) -> None:
     self.__t.step()
 
@@ -455,6 +458,14 @@ class RSPServer:
   def on_step(self, cmd):
     self.__resume(step=True)
 
+  def on_remote_cmd(self, cmd):
+    cmd = cmd[len('qRcmd,'):]
+    cmd = from_hex(cmd).decode()
+    print('Remote command: ', cmd)
+    if cmd == 'reset':
+      self.backend.reset()
+    self.send_ok()
+
   def handle_cmd(self, cmd: str):
     print(cmd)
     dispatch_table = [
@@ -480,6 +491,7 @@ class RSPServer:
       (r'^vCont;'             , self.on_v_cont),
       (r'^c$'                 , self.on_resume),
       (r'^s$'                 , self.on_step),
+      (r'^qRcmd,'             , self.on_remote_cmd),
     ]
 
     for regex, handler in dispatch_table:
