@@ -22,6 +22,8 @@ REG_NAMES = [ 'x0', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9',
   'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26', 'x27', 'x28', 'x29',
   'x30', 'sp', 'pc', 'pstate' ]
 
+STOP_SIGNAL = 5
+
 def calc_checksum(data: bytes) -> int:
   return sum(data) % 256
 
@@ -67,14 +69,8 @@ class JTAGBackend:
     print('interrupt')
     self.__t.halt()
 
-  def wait_stop(self) -> Tuple[str, int]:
-    # Polling example; replace with event-driven read from device
-    t0 = time.time()
-    while not self.__t.check_is_halted():
-      time.sleep(0.1)
-      print('wait halt again..')
-    print('wait halt done')
-    return "signal", 5
+  def wait_stop(self) -> bool:
+    return self.__t.check_is_halted()
 
   def read_all_registers(self) -> bytes:
     print('read_all_registers')
@@ -184,6 +180,9 @@ class JTAGBackend:
     return tid == 1
 
 
+STATE_NORMAL = 1
+STATE_WAIT_STOP = 2
+
 class RSPServer:
   def __init__(self, host: str, port: int, backend: JTAGBackend):
     self.host = host
@@ -194,6 +193,7 @@ class RSPServer:
     self.addr = None
     self.no_ack_mode = False
     self.current_thread = 1
+    self.state = STATE_NORMAL
 
   def send(self, packet: str):
     if not self.conn:
@@ -257,12 +257,24 @@ class RSPServer:
     print('client_read_cmd', data, self.no_ack_mode, csum_ok)
     return data.decode() if csum_ok else None
 
+  def conn_read_byte_with_timeout(self):
+    self.conn.settimeout(0.5)
+    try:
+      b = self.conn.recv(1)
+      return b
+    except socket.timeout as e:
+      raise
+    finally:
+      self.conn.settimeout(None)
+
   # Receive command packet from gdb. Returning None signals that client (gdb)
   # has disconnected
-  def client_get_cmd(self) -> Optional[str]:
+  def client_get_cmd(self, use_timeout) -> Optional[str]:
     while True:
-      b = self.conn.recv(1)
-      print('client_get_cmd', b)
+      if use_timeout:
+        b = self.conn_read_byte_with_timeout()
+      else:
+        b = self.conn.recv(1)
       if not b:
         return None
 
@@ -421,27 +433,27 @@ class RSPServer:
   def on_v_cont_q(self, cmd):
     self.send_packet("vCont;c;s")
 
+  def __resume(self, step: bool):
+    if step:
+      self.backend.step()
+    else:
+      self.backend.resume()
+
+    if not self.backend.wait_stop():
+      self.state = STATE_WAIT_STOP
+    else:
+      self.send_signal(STOP_SIGNAL)
+
   def on_v_cont(self, cmd):
     # Example formats:
     # vCont;c or vCont;s or per-thread forms. We'll just handle global c/s.
-    if ";s" in cmd:
-      self.backend.step()
-      reason, sig = self.backend.wait_stop()
-      self.send_signal(sig)
-    else:
-      self.backend.resume()
-      reason, sig = self.backend.wait_stop()
-      self.send_signal(sig)
+    self.__resume(step=";s" in cmd)
 
   def on_resume(self, cmd):
-    self.backend.resume()
-    reason, sig = self.backend.wait_stop()
-    self.send_signal(sig)
+    self.__resume(step=False)
 
   def on_step(self, cmd):
-    self.backend.step()
-    reason, sig = self.backend.wait_stop()
-    self.send_signal(sig)
+    self.__resume(step=True)
 
   def handle_cmd(self, cmd: str):
     print(cmd)
@@ -479,8 +491,20 @@ class RSPServer:
     self.send_packet("")
 
   def run_session_loop(self):
+    self.state = STATE_NORMAL
     while True:
-      cmd = self.client_get_cmd()
+      if self.state == STATE_WAIT_STOP:
+        if self.backend.wait_stop():
+          self.state = STATE_NORMAL
+          stop_signal = 5
+          self.send_signal(stop_signal)
+
+      try:
+        cmd = self.client_get_cmd(self.state == STATE_WAIT_STOP)
+      except socket.timeout as e:
+        continue
+
+      self.state = STATE_NORMAL
       if cmd is None:
         print("[-] Disconnected")
         return
