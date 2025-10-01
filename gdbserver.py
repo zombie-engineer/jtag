@@ -1,22 +1,3 @@
-#!/usr/bin/env python3
-
-"""
-Minimalistic GDB server proxy that is part of this scheme:
-gdb->[gdbserver.py]->control.py->stm32discovery JTAG firmware->Raspberry Pi
-over /dev/ttyACM* using a simple protocol.
-
-Features implemented:
-- TCP socket listener for GDB Remote Serial Protocol (RSP)
-- Packet framing, checksum verify, and acknowledgements (+/-)
-- Optional no-ack mode via QStartNoAckMode
-- Basic queries: qSupported, qAttached, qfThreadInfo/qsThreadInfo, qC, T, qXfer:features:read (stub 'l')
-- Register read/write: g/G (AArch64 zeros unless backend supplies real values)
-- Memory read/write: m/M (bridged to backend)
-- Continue/step: c/s and vCont;c;s (bridged to backend)
-- Breakpoints: Z/z (types 0=swbp, 1=hwbp; others stubbed)
-- Interrupt (^C) mapping to backend.break
-"""
-
 import socket
 import struct
 import sys
@@ -35,13 +16,20 @@ import re
 # module
 AARCH64_NUM_REGS = 33
 AARCH64_REGSET_SIZE = AARCH64_NUM_REGS * 8
+REG_ORDER = [f'x{i}' for i in range(31)] + ['sp', 'pc']
+REG_NAMES = [ 'x0', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9',
+  'x10', 'x11', 'x12', 'x13', 'x14', 'x15', 'x16', 'x17', 'x18', 'x19',
+  'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26', 'x27', 'x28', 'x29',
+  'x30', 'sp', 'pc', 'pstate' ]
+
+def calc_checksum(data: bytes) -> int:
+  return sum(data) % 256
+
 
 def swap_bytes_64(value: int) -> int:
-    """Swap bytes of a 64-bit integer (endianness conversion)."""
-    if not (0 <= value < 1 << 64):
-        raise ValueError("Value must be a 64-bit integer")
-    # Convert to bytes, reverse, convert back to int
-    return int.from_bytes(value.to_bytes(8, byteorder='little'), byteorder='big')
+  if value & ~0xffffffffffffffff:
+    raise ValueError("Value must be a 64-bit integer")
+  return int.from_bytes(value.to_bytes(8, byteorder='little'), byteorder='big')
 
 def to_hex(data: bytes) -> str:
   return binascii.hexlify(data).decode()
@@ -69,14 +57,6 @@ class JTAGBackend:
     if self.__t:
       self.__t = None
 
-  def send_cmd(self, cmd: str, payload: bytes = b"") -> bytes:
-    """Send a line command like: CMD <hex>\n and read a single line reply."""
-    self.__t.write(payload)
-    line = (cmd + (" " + to_hex(payload) if payload else "") + "\n").encode()
-    self.ser.write(line)
-    self.ser.flush()
-    return self.ser.readline().strip()
-
   def resume(self) -> None:
     self.__t.resume()
 
@@ -87,21 +67,20 @@ class JTAGBackend:
     print('interrupt')
     self.__t.halt()
 
-  def wait_stop(self, timeout: Optional[float] = None) -> Tuple[str, Optional[int]]:
+  def wait_stop(self) -> Tuple[str, int]:
     # Polling example; replace with event-driven read from device
     t0 = time.time()
     while not self.__t.check_is_halted():
-      print('is not halted yet')
-      time.sleep(1)
-    return ("signal", 5)
+      time.sleep(0.1)
+      print('wait halt again..')
+    print('wait halt done')
+    return "signal", 5
 
   def read_all_registers(self) -> bytes:
     print('read_all_registers')
-    all_regs = self.__t.dump_regs()
-    order = [f"x{i}" for i in range(31)] + ["sp", "pc"]#, "pstate"]
-    regs = all_regs[0]
+    regs = self.__t.dump_regs()[0]
     b = bytearray()
-    for r in order:
+    for r in REG_ORDER:
       b.extend(regs[r].to_bytes(8, 'little'))
     return bytes(b)
 
@@ -135,16 +114,10 @@ class JTAGBackend:
 
   def write_all_registers(self, raw: bytes) -> bool:
     num_regs = int(len(raw) / 8)
-    regnames = [
-      'x0', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7', 'x8', 'x9',
-      'x10', 'x11', 'x12', 'x13', 'x14', 'x15', 'x16', 'x17', 'x18', 'x19',
-      'x20', 'x21', 'x22', 'x23', 'x24', 'x25', 'x26', 'x27', 'x28', 'x29',
-      'x30', 'sp', 'pc', 'pstate' ]
-
     allregs = struct.unpack('<' + 'Q' * num_regs, raw)
     for i, regval in enumerate(allregs):
-      print(f'writing {regnames[i]} = 0x{regval:016x}')
-      if not self.__t.write_reg(regnames[i], regval):
+      print(f'writing {REG_NAMES[i]} = 0x{regval:016x}')
+      if not self.__t.write_reg(REG_NAMES[i], regval):
         return False
     return True
 
@@ -222,18 +195,18 @@ class RSPServer:
     self.no_ack_mode = False
     self.current_thread = 1
 
-  @staticmethod
-  def _csum(data: bytes) -> int:
-    return sum(data) % 256
+  def send(self, packet: str):
+    if not self.conn:
+      return
 
-  def _send_raw(self, b: bytes):
-    if self.conn:
-      self.conn.sendall(b)
+    print(f'sending: "{packet}"')
+    self.conn.sendall(packet.encode())
 
   def send_packet(self, payload: str):
-    pkt = b"$" + payload.encode() + b"#" + f"{self._csum(payload.encode()):02x}".encode()
-    print(pkt)
-    self._send_raw(pkt)
+    # pkt = b"$" + payload.encode() + b"#" + f"{self._csum(payload.encode()):02x}".encode()
+    csum = calc_checksum(payload.encode())
+    packet = f'${payload}#{csum:02x}'
+    self.send(packet)
     if not self.no_ack_mode:
       # Optionally wait for '+' from GDB; many stubs omit waiting.
       try:
@@ -246,13 +219,13 @@ class RSPServer:
         self.conn.settimeout(None)
 
   def send_ok(self):
-    self.send_packet("OK")
+    self.send_packet('OK')
 
   def send_error(self, code: int = 1):
-    self.send_packet(f"E{code:02x}")
+    self.send_packet(f'E{code:02x}')
 
   def send_signal(self, sig: int = 5):
-    self.send_packet(f"S{sig:02x}")
+    self.send_packet(f'S{sig:02x}')
 
   def on_break_request(self):
     # Async break (Ctrl-C)
@@ -274,13 +247,13 @@ class RSPServer:
   def client_read_test_csum(self, data):
     csum_bytes = self.conn.recv(2)
     chksum = int(csum_bytes.decode(), 16)
-    return self._csum(bytes(data)) == chksum
+    return calc_checksum(bytes(data)) == chksum
 
   def client_read_cmd(self):
     data = self.client_read_cmd_line()
     csum_ok = self.client_read_test_csum(data)
     if not self.no_ack_mode:
-      self._send_raw(b'+' if csum_ok else b'-')
+      self.send('+' if csum_ok else '-')
     print('client_read_cmd', data, self.no_ack_mode, csum_ok)
     return data.decode() if csum_ok else None
 
@@ -388,7 +361,8 @@ class RSPServer:
  
   def on_q_start_no_ack_mode(self, cmd):
     self.no_ack_mode = True
-    self._send_raw(b"+")  # acknowledge the command itself
+    # acknowledge the command itself
+    self.send('+')
     self.send_ok()
 
   def on_v_must_reply_empty(self, cmd):
@@ -430,8 +404,8 @@ class RSPServer:
     self.send_signal(5)
 
   def on_read_all_regs(self, cmd):
-    raw = self.backend.read_all_registers()
-    self.send_packet(to_hex(raw))
+    data = self.backend.read_all_registers()
+    self.send_packet(to_hex(data))
 
   def on_write_all_regs(self, cmd):
     raw = from_hex(cmd[1:])
@@ -453,21 +427,21 @@ class RSPServer:
     if ";s" in cmd:
       self.backend.step()
       reason, sig = self.backend.wait_stop()
-      self.send_signal(sig or 5)
+      self.send_signal(sig)
     else:
       self.backend.resume()
       reason, sig = self.backend.wait_stop()
-      self.send_signal(sig or 5)
+      self.send_signal(sig)
 
   def on_resume(self, cmd):
     self.backend.resume()
     reason, sig = self.backend.wait_stop()
-    self.send_signal(sig or 5)
+    self.send_signal(sig)
 
   def on_step(self, cmd):
     self.backend.step()
     reason, sig = self.backend.wait_stop()
-    self.send_signal(sig or 5)
+    self.send_signal(sig)
 
   def handle_cmd(self, cmd: str):
     print(cmd)
