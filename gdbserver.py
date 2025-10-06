@@ -597,7 +597,7 @@ class RSPServer:
       (r'^m'                  , self.on_memory_read),
       (r'^M'                  , self.on_memory_write),
       (r'^[Zz]'               , self.on_breakpoint),
-      (r'^vCont?$'            , self.on_v_cont_q),
+      (r'^vCont[?]$'          , self.on_v_cont_q),
       (r'^vCont;'             , self.on_v_cont),
       (r'^c$'                 , self.on_resume),
       (r'^s$'                 , self.on_step),
