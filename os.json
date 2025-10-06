@@ -1,0 +1,8 @@
+{
+  "task_current" : "0xffff000000344730",
+  "tasks_array" : "0xffff000000366f90",
+  "task_size" : 80,
+  "task_offset_name" : 16,
+  "task_offset_id" : 32,
+  "task_offset_cpuctx" : 40
+}

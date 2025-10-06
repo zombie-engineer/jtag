@@ -1,3 +1,4 @@
+import argparse
 import socket
 import struct
 import sys
@@ -10,6 +11,25 @@ import logging
 from typing import Optional, Tuple, Dict
 import serial
 import re
+import json
+
+
+os_json = None
+
+class OsTask:
+  def __init__(self, tid, addr, name, cpuctx, current):
+    self.tid = tid
+    self.address = addr
+    self.name = name
+    self.cpuctx = cpuctx
+    self.is_current = current
+
+  def __repr__(self):
+    result = '* ' if self.is_current else ''
+    result += f'tid:{self.tid} addr:0x{self.address:016x}'
+    result += f' "{self.name}" ctx:0x{self.cpuctx:016x}'
+    return result
+
 
 # AArch64 registers layout matches default one in gdb.
 # For greater details generation of target.xml should be supported by this
@@ -42,11 +62,49 @@ def from_hex(s: str) -> bytes:
 def to_word_aligned(val, word_size):
   return int((val + word_size - 1) / word_size) * word_size
 
+def get_tasks(backend):
+  tasks_addr = int(os_json['tasks_array'], 16)
+  task_size = os_json['task_size']
+  task_current = int(os_json['task_current'], 16)
+  task_offset_name = os_json['task_offset_name']
+  task_offset_id = os_json['task_offset_id']
+  task_offset_cpuctx = os_json['task_offset_cpuctx']
+
+  task_current_addr = backend.read_mem(task_current, 8)
+  task_current_addr = int.from_bytes(task_current_addr, 'little')
+  print(f'current_task: 0x{task_current_addr:016x}')
+
+  tasks = [
+  ]
+
+  for i in range(20):
+    task_addr = tasks_addr + i * task_size
+    task_raw = backend.read_mem(task_addr, task_size)
+    task_name = task_raw[task_offset_name: task_offset_name + 16]
+    task_name = task_name.split(b'\x00', 1)
+    if len(task_name) == 1:
+      break
+
+    task_name = task_name[0].decode('ascii')
+    print(task_name)
+    task_id = task_raw[task_offset_id: task_offset_id + 4]
+    task_id = int.from_bytes(task_id, 'little')
+    task_cpuctx = task_raw[task_offset_cpuctx: task_offset_cpuctx + 8]
+    task_cpuctx = int.from_bytes(task_cpuctx, 'little')
+    current = task_addr == task_current_addr
+    print(task_id)
+    tasks.append(OsTask(task_id, task_addr, task_name, task_cpuctx, current))
+  return tasks
+
+
 class JTAGBackend:
   def __init__(self, port: str = "/dev/ttyACM0", baud: int = 115200):
     self.__port = port
     self.__baud = baud
     self.__t = None
+    self.__reg_tid = 0
+    self.__current_tid = 1
+    self.__tasks = []
 
   def connect(self):
     s = serial.Serial(self.__port, self.__baud, timeout=100)
@@ -54,6 +112,13 @@ class JTAGBackend:
     logging.info(f"Opened {self.__port} with baud rate {self.__baud}")
     self.__t.init()
     self.__t.halt()
+    self.__tasks = get_tasks(self)
+    for i, t in enumerate(self.__tasks):
+      if t.is_current:
+        self.__reg_tid = t.tid
+        self.__current_tid = t.tid
+        print('IS_CURRENT', self.__reg_tid)
+      print(t)
 
   def disconnect(self):
     if self.__t:
@@ -75,9 +140,27 @@ class JTAGBackend:
   def wait_stop(self) -> bool:
     return self.__t.check_is_halted()
 
+  def get_task_by_tid(self, tid):
+    for i in self.__tasks:
+      if i.tid == tid:
+        return i
+    return None
+
+  def set_reg_tid(self, tid):
+    self.__reg_tid = tid
+
   def read_all_registers(self) -> bytes:
-    print('read_all_registers')
-    regs = self.__t.dump_regs()[0]
+    print(f'read_all_registers from tid {self.__reg_tid}')
+    if self.__reg_tid == self.__current_tid:
+      regs = self.__t.dump_regs()[0]
+    else:
+      t = self.get_task_by_tid(self.__reg_tid)
+      regs_raw = self.read_mem(t.cpuctx, AARCH64_REGSET_SIZE)
+      regs = {}
+      for r in REG_ORDER:
+        regs[r] = int.from_bytes(regs_raw[:8], 'little')
+        regs_raw = regs_raw[8:]
+      print(regs)
     b = bytearray()
     for r in REG_ORDER:
       b.extend(regs[r].to_bytes(8, 'little'))
@@ -174,9 +257,18 @@ class JTAGBackend:
     return self.__t.breakpoint(addr, kind, add=False, hardware=True)
 
   def list_threads(self):
-    return [1]
+    return [i.tid for i in self.__tasks]
+
+  def get_thread_name(self, tid):
+    for i in self.__tasks:
+      if i.tid == tid:
+        return i.name
+    return None
 
   def current_thread(self):
+    for i in self.__tasks:
+      if i.is_current:
+        return i.tid
     return 1
 
   def set_thread(self, tid: int) -> bool:
@@ -195,7 +287,6 @@ class RSPServer:
     self.conn = None
     self.addr = None
     self.no_ack_mode = False
-    self.current_thread = 1
     self.state = STATE_NORMAL
 
   def send(self, packet: str):
@@ -263,11 +354,15 @@ class RSPServer:
   def conn_read_byte_with_timeout(self):
     self.conn.settimeout(0.5)
     try:
+      print('receiving...')
       b = self.conn.recv(1)
+      print(f'received {b}...')
       return b
     except socket.timeout as e:
+      print('exception', e)
       raise
     finally:
+      print('finally, timeout set to None')
       self.conn.settimeout(None)
 
   # Receive command packet from gdb. Returning None signals that client (gdb)
@@ -400,6 +495,16 @@ class RSPServer:
   def on_qs_thread_info(self, cmd):
     self.send_packet("l")
 
+  def on_q_thread_extra_info(self, cmd):
+    tid = int(cmd.split(',')[1])
+    print(tid)
+    name = self.backend.get_thread_name(tid)
+    if name is not None:
+      name = to_hex(name.encode('ascii'))
+      self.send_packet(name)
+    else:
+      self.send_error(1)
+
   def on_q_offsets(self, cmd):
     self.send_packet('Text=0;Data=0;Bss=0')
 
@@ -411,6 +516,10 @@ class RSPServer:
     self.send_packet("OK")
 
   def on_set_current_thread(self, cmd):
+    tid = int(cmd[2:])
+    if cmd[1] == 'g':
+      print(f'Set register tid to {tid}')
+      self.backend.set_reg_tid(tid)
     # Set thread for step/continue or for reg access.
     # Expect 'Hc{tid}' / 'Hg{tid}'
     self.send_ok()
@@ -461,9 +570,9 @@ class RSPServer:
   def on_remote_cmd(self, cmd):
     cmd = cmd[len('qRcmd,'):]
     cmd = from_hex(cmd).decode()
-    print('Remote command: ', cmd)
     if cmd == 'reset':
       self.backend.reset()
+    print('Remote command: ', cmd)
     self.send_ok()
 
   def handle_cmd(self, cmd: str):
@@ -476,6 +585,7 @@ class RSPServer:
       (r'^qXfer:features:read', self.q_xfer_features_read),
       (r'^qfThreadInfo$'      , self.on_qf_thread_info),
       (r'^qsThreadInfo$'      , self.on_qs_thread_info),
+      (r'^qThreadExtraInfo'   , self.on_q_thread_extra_info),
       (r'^qOffsets$'          , self.on_q_offsets),
       (r'^qC$'                , self.on_q_current_thread),
       (r'^T'                  , self.on_q_thread_alive),
@@ -506,7 +616,9 @@ class RSPServer:
     self.state = STATE_NORMAL
     while True:
       if self.state == STATE_WAIT_STOP:
+        print('will wait for stop...')
         if self.backend.wait_stop():
+          print('stopped')
           self.state = STATE_NORMAL
           stop_signal = 5
           self.send_signal(stop_signal)
@@ -514,6 +626,7 @@ class RSPServer:
       try:
         cmd = self.client_get_cmd(self.state == STATE_WAIT_STOP)
       except socket.timeout as e:
+        print('timeout..')
         continue
 
       self.state = STATE_NORMAL
@@ -538,7 +651,6 @@ class RSPServer:
 
 
 def main():
-  import argparse
   p = argparse.ArgumentParser(
     description="AArch64 GDB RSP stub bridging to a JTAG over /dev/ttyACM*")
 
@@ -549,7 +661,10 @@ def main():
   p.add_argument('-v', '--verbose', help='print verbose logs',
     action='store_const', dest='loglevel', const=logging.DEBUG,
     default=logging.INFO)
+  p.add_argument("--osdesc")
   args = p.parse_args()
+  global os_json
+  os_json = json.loads(open(args.osdesc, 'rt').read())
   logging.basicConfig(format='%(levelname)s:%(message)s', level=args.loglevel)
 
   backend = JTAGBackend(args.serial, args.baud)
