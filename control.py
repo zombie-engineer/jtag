@@ -131,16 +131,15 @@ class TargetStatus:
 
 
 class Target:
-  def __init__(self, s):
+  def __init__(self, s: serial.Serial, logger, logger_tty):
     self.__status = TargetStatus()
     self.__s = s
-    self.debug_tty_read = True
-    self.debug_tty_write = True
+    self.__log = logger
+    self.__log_tty = logger_tty
 
   def write(self, data):
     data = (data + '\r\n').encode('utf-8')
-    if self.debug_tty_write:
-      logging.debug(f'tty_write:{data}')
+    self.__log_tty.debug(f'tty_write:{data}')
     self.__s.write(data)
 
   def wait_cursor(self):
@@ -158,10 +157,15 @@ class Target:
         break
       if c == '>':
         break
+
+    if self.__log_tty.getEffectiveLevel() == logging.DEBUG:
+      self.__log_tty.debug(f'wait_cursor: received:')
+      for l in last_lines:
+        self.__log_tty.debug(f'  [ "{l}"' + ' ' * (32 - len(l)) + ']')
+
     if not last_lines[-1]:
       last_lines = last_lines[:-1]
-    if self.debug_tty_read:
-      logging.debug(f'wait_cursor: last_lines: {last_lines}')
+
 
     err = 0
     if last_lines[-1].startswith('done'):
@@ -181,7 +185,7 @@ class Target:
   def check_is_halted(self):
     self.write('?halted')
     err, lines = self.wait_cursor()
-    print(err, lines)
+    self.__log.debug(err, lines)
     return err == 0
 
   def update_status(self):
@@ -192,8 +196,8 @@ class Target:
       if status.strip():
         break
 
-    print(status)
-    status = status.split(':')[1]
+    status = status.split(':')[1].strip()
+    self.__log.debug(f'reported target status "{status}"')
     self.__status.attached = 'not attached' not in status
     if self.__status.attached:
       self.__status.halted = 'halted' in status
@@ -210,7 +214,7 @@ class Target:
       core, name, value = regentry.split(',')
       name = name.strip()
       response.setdefault(int(core), {})[name] = int(value, 0)
-      logging.info(f'core {core}, {name}: {value}')
+      self.__log.debug(f'core {core}, {name}: {value}')
     return response
 
   def write_reg(self, regname, value):
@@ -247,10 +251,10 @@ class Target:
     countstr = ''
 
     if count < 1 or count > 0xffff:
-      logging.error("invalid argument 'count': {count}")
+      self.__log.error("invalid argument 'count': {count}")
       return []
     if size not in [32, 64]:
-      logging.error("invalid argument 'size': {size}")
+      self.__log.error("invalid argument 'size': {size}")
       return []
 
     if count > 1:
@@ -260,14 +264,16 @@ class Target:
     self.write(cmd)
     err, lines = self.wait_cursor()
     if err:
-      print(f'Mem read cmd failed, err:{err}, details:{lines}')
+      self.__log.error(f'Mem read cmd failed, err:{err}, details:{lines}')
       return []
 
-    print('__mem_read result:', lines)
+    if self.__log.getEffectiveLevel() == logging.DEBUG:
+      self.__log.debug(f'__mem_read: result:')
+      for l in lines:
+        self.__log.debug(f'  {l}')
     assert len(lines)
     assert lines[0] == cmd
     lines.pop(0)
-
     return [int(i, base=0) for i in lines]
 
   def mem_read32(self, address, count=1):
@@ -280,19 +286,20 @@ class Target:
     self.write(f'w32 0x{address:016x} 0x{value:08x}')
     err, lines = self.wait_cursor()
     if err:
-      print('Failed to write', lines)
+      self.__log.error('Failed to write', lines)
     return err == 0
 
   def mem_write64(self, address, value):
     self.write(f'w64 0x{address:016x} 0x{value:016x}')
     err, lines = self.wait_cursor()
     if err:
-      print('Failed to write', lines)
+      self.__log.error('Failed to write', lines)
     return err == 0
 
   def breakpoint(self, addr, kind, add=True, hardware=False):
     action = 'setting' if add else 'removing'
-    print(f'{action} breakpoint, addr:0x{addr:016x}, kind:{kind}, hw:{hardware}')
+    self.__log.debug(
+      f'{action} breakpoint, addr:0x{addr:016x}, kind:{kind}, hw:{hardware}')
 
     cmd = 'bp'
     if hardware:
@@ -305,7 +312,7 @@ class Target:
     self.write(f'{cmd} 0x{addr:016x}')
     err, lines = self.wait_cursor()
     if err:
-      print('Failed to write', lines)
+      self.__log.error('Failed to write', lines)
       return False
     return True
 
@@ -327,7 +334,7 @@ def assert_state(is_acmd, cmd_idx, state):
 
 
 def parse_r6(r: sdhc.cmd_result):
-  print(f'R6 response is: {r.resp0:08x}')
+  self.__log.debug(f'R6 response is: {r.resp0:08x}')
   rca   = (r.resp0 >> 16) & 0xffff
   old_state = (r.resp0 >> 9) & 0xf
 
@@ -665,7 +672,9 @@ def parse_cmd6_check_data(check_data):
 def target_attach_and_halt(ttydev, baudrate):
   s = serial.Serial(ttydev, baudrate, timeout=100)
   logging.info(f"Opened {ttydev} with baud rate {baudrate}")
-  t = Target(s)
+  log_tty = logging.getLogger('D_TTY')
+  log = logging.getLogger('D_STA')
+  t = Target(s, log, log_tty)
   t.update_status()
   status = t.get_status()
   if not status.attached:

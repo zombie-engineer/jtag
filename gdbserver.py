@@ -62,7 +62,7 @@ def from_hex(s: str) -> bytes:
 def to_word_aligned(val, word_size):
   return int((val + word_size - 1) / word_size) * word_size
 
-def get_tasks(backend):
+def get_tasks(backend, log):
   tasks_addr = int(os_json['tasks_array'], 16)
   task_size = os_json['task_size']
   task_current = int(os_json['task_current'], 16)
@@ -72,53 +72,49 @@ def get_tasks(backend):
 
   task_current_addr = backend.read_mem(task_current, 8)
   task_current_addr = int.from_bytes(task_current_addr, 'little')
-  print(f'current_task: 0x{task_current_addr:016x}')
+  log.debug(f'current_task: 0x{task_current_addr:016x}')
 
   tasks = [
   ]
 
-  for i in range(20):
+  for i in range(12):
     task_addr = tasks_addr + i * task_size
     task_raw = backend.read_mem(task_addr, task_size)
     task_name = task_raw[task_offset_name: task_offset_name + 16]
     task_name = task_name.split(b'\x00', 1)
-    if len(task_name) == 1:
-      break
-
     task_name = task_name[0].decode('ascii')
-    print(task_name)
+    if len(task_name) == 0:
+      break
     task_id = task_raw[task_offset_id: task_offset_id + 4]
-    task_id = int.from_bytes(task_id, 'little')
+    task_id = int.from_bytes(task_id, 'little') + 1
     task_cpuctx = task_raw[task_offset_cpuctx: task_offset_cpuctx + 8]
     task_cpuctx = int.from_bytes(task_cpuctx, 'little')
     current = task_addr == task_current_addr
-    print(task_id)
-    tasks.append(OsTask(task_id, task_addr, task_name, task_cpuctx, current))
+    log.info(f'found task, tid:{task_id}, name:"{task_name}"')
+    tasks.append(OsTask(task_id, task_addr, task_name, task_cpuctx,
+      current))
+
   return tasks
 
 
 class JTAGBackend:
-  def __init__(self, port: str = "/dev/ttyACM0", baud: int = 115200):
-    self.__port = port
-    self.__baud = baud
-    self.__t = None
-    self.__reg_tid = 0
-    self.__current_tid = 1
-    self.__tasks = []
-
-  def connect(self):
-    s = serial.Serial(self.__port, self.__baud, timeout=100)
-    self.__t = control.Target(s)
-    logging.info(f"Opened {self.__port} with baud rate {self.__baud}")
+  def __init__(self, target: control.Target, logger):
+    self.__log = logger
+    self.__t = target
     self.__t.init()
     self.__t.halt()
-    self.__tasks = get_tasks(self)
+    self.__tasks = get_tasks(self, self.__log)
     for i, t in enumerate(self.__tasks):
-      if t.is_current:
-        self.__reg_tid = t.tid
-        self.__current_tid = t.tid
-        print('IS_CURRENT', self.__reg_tid)
-      print(t)
+      self.__log.debug(t)
+    self.__reg_tid = self.get_current_thread().tid
+    self.stopped_tid = self.__reg_tid
+
+  def update_tasks_on_halt(self):
+    self.__tasks = get_tasks(self, self.__log)
+    for i, t in enumerate(self.__tasks):
+      self.__log.debug(t)
+    self.__reg_tid = self.get_current_thread().tid
+    self.stopped_tid = self.__reg_tid
 
   def disconnect(self):
     if self.__t:
@@ -134,33 +130,37 @@ class JTAGBackend:
     self.__t.step()
 
   def interrupt(self) -> None:
-    print('interrupt')
+    self.__log.into('interrupt')
     self.__t.halt()
 
   def wait_stop(self) -> bool:
-    return self.__t.check_is_halted()
-
-  def get_task_by_tid(self, tid):
-    for i in self.__tasks:
-      if i.tid == tid:
-        return i
-    return None
+    halted = self.__t.check_is_halted()
+    if halted:
+      self.update_tasks_on_halt()
+    return halted
 
   def set_reg_tid(self, tid):
-    self.__reg_tid = tid
+    if tid == 0:
+      self.__reg_tid = self.get_current_thread().tid
+    else:
+      self.__reg_tid = tid
+    self.__log.debug(f'current tid for \'g\' ops set to \'{self.__reg_tid}\'')
 
   def read_all_registers(self) -> bytes:
-    print(f'read_all_registers from tid {self.__reg_tid}')
-    if self.__reg_tid == self.__current_tid:
+    self.__log.debug(f'read_all_registers from tid {self.__reg_tid}')
+    if self.__reg_tid == self.get_current_thread().tid:
       regs = self.__t.dump_regs()[0]
     else:
-      t = self.get_task_by_tid(self.__reg_tid)
+      t = self.get_thread_by_tid(self.__reg_tid)
       regs_raw = self.read_mem(t.cpuctx, AARCH64_REGSET_SIZE)
       regs = {}
       for r in REG_ORDER:
         regs[r] = int.from_bytes(regs_raw[:8], 'little')
         regs_raw = regs_raw[8:]
-      print(regs)
+      if self.__log.getEffectiveLevel() == logging.DEBUG:
+        self.__log.debug(f'TID {self.__reg_tid} regs:')
+        for k,v in regs.items():
+          self.__log.debug(f'  {k}: 0x{v:016x}')
     b = bytearray()
     for r in REG_ORDER:
       b.extend(regs[r].to_bytes(8, 'little'))
@@ -183,14 +183,17 @@ class JTAGBackend:
 
   def write_register(self, reg_id, regval) -> bool:
     regname = self.reg_id_to_name(reg_id)
-    print('regname', regname, reg_id)
     if not regname:
+      self.__log.warn('Could not find register with id {reg_id}')
       return False
+    self.__log.debug(
+      'Writing to register {regname} (#{reg_id}), value:0x{regval:016x}')
     return self.__t.write_reg(regname, swap_bytes_64(regval))
 
   def read_register(self, reg_id):
     regname = self.reg_id_to_name(reg_id)
     if not regname:
+      self.__log.warn('Could not find register with id {reg_id}')
       return False, 0
     return self.__t.read_reg(regname)
 
@@ -198,13 +201,13 @@ class JTAGBackend:
     num_regs = int(len(raw) / 8)
     allregs = struct.unpack('<' + 'Q' * num_regs, raw)
     for i, regval in enumerate(allregs):
-      print(f'writing {REG_NAMES[i]} = 0x{regval:016x}')
+      self.__log.debug(f'writing {REG_NAMES[i]} = 0x{regval:016x}')
       if not self.__t.write_reg(REG_NAMES[i], regval):
         return False
     return True
 
   def read_mem(self, addr: int, length: int) -> Optional[bytes]:
-    print(f'read mem: addr 0x{addr:016x}, length:{length}')
+    self.__log.debug(f'read mem: addr 0x{addr:016x}, length:{length}')
     if not length:
       return b''
 
@@ -235,16 +238,16 @@ class JTAGBackend:
     return result[head_skip:]
 
   def write_mem(self, addr: int, data: bytes) -> bool:
-    print(f'write_mem: {addr:016x}, data:{data}')
+    self.__log.debug(f'write_mem: {addr:016x}, data:{data}')
     if len(data) == 4:
       return self.__t.mem_write32(addr, int().from_bytes(data, 'little'))
     if len(data) == 8:
       return self.__t.mem_write64(addr, int().from_bytes(data, 'little'))
-    print(f'write_mem: data length unsupported {len(data)}')
+    self.__log.debug(f'write_mem: data length unsupported {len(data)}')
     return False
 
   def set_sw_break(self, addr: int, kind: int) -> bool:
-    print('set_sw_break')
+    self.__log.info(f'Software breakpoint at 0x{addr:016x}')
     return self.__t.breakpoint(addr, kind, add=True, hardware=False)
 
   def clr_sw_break(self, addr: int, kind: int) -> bool:
@@ -256,30 +259,32 @@ class JTAGBackend:
   def clr_hw_break(self, addr: int, kind: int) -> bool:
     return self.__t.breakpoint(addr, kind, add=False, hardware=True)
 
-  def list_threads(self):
+  def get_all_tids(self):
     return [i.tid for i in self.__tasks]
 
-  def get_thread_name(self, tid):
+  def get_thread_by_tid(self, tid):
     for i in self.__tasks:
       if i.tid == tid:
-        return i.name
+        return i
     return None
 
-  def current_thread(self):
+  def get_thread_name(self, tid):
+    return self.get_thread_by_tid(tid).name
+
+  def get_current_thread(self):
     for i in self.__tasks:
       if i.is_current:
-        return i.tid
-    return 1
-
-  def set_thread(self, tid: int) -> bool:
-    return tid == 1
+        return i
+    return None
 
 
 STATE_NORMAL = 1
 STATE_WAIT_STOP = 2
 
 class RSPServer:
-  def __init__(self, host: str, port: int, backend: JTAGBackend):
+  def __init__(self, host: str, port: int, backend: JTAGBackend,
+    logger_rsp, logger):
+
     self.host = host
     self.port = port
     self.backend = backend
@@ -288,16 +293,17 @@ class RSPServer:
     self.addr = None
     self.no_ack_mode = False
     self.state = STATE_NORMAL
+    self.__log_rsp = logger_rsp
+    self.__log = logger
 
   def send(self, packet: str):
     if not self.conn:
       return
 
-    print(f'sending: "{packet}"')
+    self.__log_rsp.debug(f'sending: "{packet}"')
     self.conn.sendall(packet.encode())
 
   def send_packet(self, payload: str):
-    # pkt = b"$" + payload.encode() + b"#" + f"{self._csum(payload.encode()):02x}".encode()
     csum = calc_checksum(payload.encode())
     packet = f'${payload}#{csum:02x}'
     self.send(packet)
@@ -321,9 +327,17 @@ class RSPServer:
   def send_signal(self, sig: int = 5):
     self.send_packet(f'S{sig:02x}')
 
+  def send_stop_packet(self, breakpoint):
+    sig = 5 # TRAP
+    tid = self.backend.stopped_tid
+    packet = f'T{sig:02x}thread:{tid:02};'
+    if breakpoint:
+      packet += 'reason:swbreak;'
+    self.send_packet(packet)
+
   def on_break_request(self):
     # Async break (Ctrl-C)
-    print('\x03 async break')
+    self.__log_rsp.debug('\x03 async break')
     self.backend.interrupt()
     # Report stop
     self.send_signal(5)
@@ -348,21 +362,20 @@ class RSPServer:
     csum_ok = self.client_read_test_csum(data)
     if not self.no_ack_mode:
       self.send('+' if csum_ok else '-')
-    print('client_read_cmd', data, self.no_ack_mode, csum_ok)
+
+    self.__log_rsp.debug(
+      f'received: data:{data}, ack_mode:{self.no_ack_mode}, csum:{csum_ok}')
     return data.decode() if csum_ok else None
 
   def conn_read_byte_with_timeout(self):
     self.conn.settimeout(0.5)
     try:
-      print('receiving...')
       b = self.conn.recv(1)
-      print(f'received {b}...')
       return b
     except socket.timeout as e:
-      print('exception', e)
+      self.__log_rsp.warn(f'exception while reading byte: {e}')
       raise
     finally:
-      print('finally, timeout set to None')
       self.conn.settimeout(None)
 
   # Receive command packet from gdb. Returning None signals that client (gdb)
@@ -417,7 +430,7 @@ class RSPServer:
     if len(data) == length:
       self.send_packet(to_hex(data))
     else:
-      print(f'error, data is {data}, len:{len(data)}, should_be:{length}')
+      self.__log.error(f'data is {data}, len:{len(data)}, should_be:{length}')
       self.send_error(1)
 
   def on_memory_write(self, cmd):
@@ -445,7 +458,7 @@ class RSPServer:
       reg_id, value = body.split('=')
       reg_id = int('0x' + reg_id, 16)
       value = int('0x' + value, 16)
-      print(f'requested register write reg {reg_id} = 0x{value:016x}')
+      self.__log.debug(f'requested register write reg {reg_id} = 0x{value:016x}')
       if self.backend.write_register(reg_id, value):
         self.send_ok()
       else:
@@ -460,7 +473,6 @@ class RSPServer:
       self.send_error(1)
 
   def on_q_supported(self, cmd):
-    print(cmd)
     self.send_packet(';'.join([
       "PacketSize=4000",
       "swbreak+",
@@ -486,7 +498,7 @@ class RSPServer:
     self.send_packet("l")
 
   def on_qf_thread_info(self, cmd):
-    tids = self.backend.list_threads()
+    tids = self.backend.get_all_tids()
     if tids:
       self.send_packet("m" + ",".join(str(t) for t in tids))
     else:
@@ -497,19 +509,21 @@ class RSPServer:
 
   def on_q_thread_extra_info(self, cmd):
     tid = int(cmd.split(',')[1])
-    print(tid)
     name = self.backend.get_thread_name(tid)
     if name is not None:
       name = to_hex(name.encode('ascii'))
+      self.__log.info(f'requested extra info for thread {tid}. Name={name}')
       self.send_packet(name)
     else:
+      self.__log.warn(f'requested extra info for unknown thread {tid}')
       self.send_error(1)
 
   def on_q_offsets(self, cmd):
     self.send_packet('Text=0;Data=0;Bss=0')
 
   def on_q_current_thread(self, cmd):
-    self.send_packet(f"QC{self.backend.current_thread():x}")
+    tid = self.backend.get_current_thread().tid
+    self.send_packet(f"QC{tid:x}")
 
   def on_q_thread_alive(self, cmd):
     # Thread-alive query 'Txx'
@@ -518,14 +532,14 @@ class RSPServer:
   def on_set_current_thread(self, cmd):
     tid = int(cmd[2:])
     if cmd[1] == 'g':
-      print(f'Set register tid to {tid}')
+      self.__log.info(f'Set register tid to {tid}')
       self.backend.set_reg_tid(tid)
     # Set thread for step/continue or for reg access.
     # Expect 'Hc{tid}' / 'Hg{tid}'
     self.send_ok()
 
   def on_q_stop_reason(self, cmd):
-    self.send_signal(5)
+    self.send_stop_packet(breakpoint=False)
 
   def on_read_all_regs(self, cmd):
     data = self.backend.read_all_registers()
@@ -554,7 +568,7 @@ class RSPServer:
     if not self.backend.wait_stop():
       self.state = STATE_WAIT_STOP
     else:
-      self.send_signal(STOP_SIGNAL)
+      self.send_stop_packet(True)
 
   def on_v_cont(self, cmd):
     # Example formats:
@@ -570,13 +584,13 @@ class RSPServer:
   def on_remote_cmd(self, cmd):
     cmd = cmd[len('qRcmd,'):]
     cmd = from_hex(cmd).decode()
+    self.__log.debug(f'received remote command from gdb: "{cmd}"')
     if cmd == 'reset':
       self.backend.reset()
-    print('Remote command: ', cmd)
     self.send_ok()
 
   def handle_cmd(self, cmd: str):
-    print(cmd)
+    self.__log.debug(f'handling RSP command: "{cmd}"')
     dispatch_table = [
       (r'^qSupported'         , self.on_q_supported),
       (r'^QStartNoAckMode$'   , self.on_q_start_no_ack_mode),
@@ -590,7 +604,7 @@ class RSPServer:
       (r'^qC$'                , self.on_q_current_thread),
       (r'^T'                  , self.on_q_thread_alive),
       (r'^H[cg]'              , self.on_set_current_thread),
-      (r'^\?$'                 , self.on_q_stop_reason),
+      (r'^\?$'                , self.on_q_stop_reason),
       (r'^g$'                 , self.on_read_all_regs),
       (r'^G$'                 , self.on_write_all_regs),
       (r'^[Pp]'               , self.on_reg_access),
@@ -616,41 +630,41 @@ class RSPServer:
     self.state = STATE_NORMAL
     while True:
       if self.state == STATE_WAIT_STOP:
-        print('will wait for stop...')
+        self.__log.info('will wait for stop...')
         if self.backend.wait_stop():
-          print('stopped')
+          self.__log.info('stopped')
           self.state = STATE_NORMAL
-          stop_signal = 5
-          self.send_signal(stop_signal)
+          self.send_stop_packet(True)
 
       try:
         cmd = self.client_get_cmd(self.state == STATE_WAIT_STOP)
       except socket.timeout as e:
-        print('timeout..')
+        self.__log.debug('timeout..')
         continue
 
       self.state = STATE_NORMAL
       if cmd is None:
-        print("[-] Disconnected")
+        self.__log.info("[-] Disconnected")
         return
-      print(f"[>] {cmd}")
       self.handle_cmd(cmd)
 
 
   def serve(self):
-    self.backend.connect()
+    # self.backend.connect()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
       s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
       s.bind((self.host, self.port))
       s.listen(1)
-      print(f"[+] Listening on {self.host}:{self.port}")
+      self.__log.info(f"[+] Listening on {self.host}:{self.port}")
       self.conn, self.addr = s.accept()
-      print(f"[+] GDB connected from {self.addr}")
+      self.__log.info(f"[+] GDB connected from {self.addr}")
       with self.conn:
         self.run_session_loop()
 
 
 def main():
+  global os_json
+
   p = argparse.ArgumentParser(
     description="AArch64 GDB RSP stub bridging to a JTAG over /dev/ttyACM*")
 
@@ -661,14 +675,52 @@ def main():
   p.add_argument('-v', '--verbose', help='print verbose logs',
     action='store_const', dest='loglevel', const=logging.DEBUG,
     default=logging.INFO)
+
+  p.add_argument('--log-dbg-tty',
+    help='Log tty messages to/from debugger',
+    action='store_const', dest='log_level_debugger_tty', const=logging.DEBUG,
+    default=logging.INFO)
+
+  p.add_argument('--log-dbg',
+    help='Log debugger communication statuses',
+    action='store_const', dest='log_level_debugger', const=logging.DEBUG,
+    default=logging.INFO)
+
+  p.add_argument('--log-rsp',
+    help='Log RSP (remote serial protocol) messages',
+    action='store_const', dest='log_level_rsp', const=logging.DEBUG,
+    default=logging.INFO)
+
   p.add_argument("--osdesc")
   args = p.parse_args()
-  global os_json
-  os_json = json.loads(open(args.osdesc, 'rt').read())
-  logging.basicConfig(format='%(levelname)s:%(message)s', level=args.loglevel)
+  logging_fmt='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+  logging_datefmt='%s'
 
-  backend = JTAGBackend(args.serial, args.baud)
-  server = RSPServer(args.host, args.port, backend)
+  logging.basicConfig(format=logging_fmt, datefmt=logging_datefmt,
+    level=args.loglevel)
+
+  logger_gdb_server = logging.getLogger('SRV')
+
+  logger_dbg_tty = logging.getLogger('D_TTY')
+  logger_dbg = logging.getLogger('D_STA')
+  logger_rsp = logging.getLogger('RSP')
+
+  logger_gdb_server.setLevel(args.loglevel)
+  logger_dbg_tty.setLevel(args.log_level_debugger_tty)
+  logger_dbg.setLevel(args.log_level_debugger)
+  logger_rsp.setLevel(args.log_level_rsp)
+
+  os_json = json.loads(open(args.osdesc, 'rt').read())
+
+  debuger_serial = serial.Serial(args.serial, args.baud, timeout=100)
+  logger_gdb_server.info(f'Opened {args.serial} with baud rate {args.baud}')
+
+  debugger = control.Target(debuger_serial, logger_dbg, logger_dbg_tty)
+
+  backend = JTAGBackend(debugger, logger_gdb_server)
+  server = RSPServer(args.host, args.port, backend, logger_rsp,
+    logger_gdb_server)
+
   server.serve()
 
 
