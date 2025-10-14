@@ -62,6 +62,27 @@ def from_hex(s: str) -> bytes:
 def to_word_aligned(val, word_size):
   return int((val + word_size - 1) / word_size) * word_size
 
+def get_tasks_brief(backend, log):
+  tasks_addr = int(os_json['tasks_array'], 16)
+  task_size = os_json['task_size']
+  task_current = int(os_json['task_current'], 16)
+  task_offset_name = os_json['task_offset_name']
+  task_offset_cpuctx = os_json['task_offset_cpuctx']
+  # task_current_addr = backend.read_mem(task_current, 8)
+  tasks = [
+  ]
+
+  for i in range(12):
+    memaddr_cpuctx_addr = tasks_addr + i * task_size + task_offset_cpuctx
+    rawbytes = backend.read_mem(memaddr_cpuctx_addr, 8)
+    cpuctx_addr = int.from_bytes(rawbytes, 'little')
+    print(f'{memaddr_cpuctx_addr:016x}: {cpuctx_addr:016x}')
+    if not cpuctx_addr:
+      break
+
+    tasks.append(cpuctx_addr)
+  return tasks
+
 def get_tasks(backend, log):
   tasks_addr = int(os_json['tasks_array'], 16)
   task_size = os_json['task_size']
@@ -103,18 +124,23 @@ class JTAGBackend:
     self.__t = target
     self.__t.init()
     self.__t.halt()
-    self.__tasks = get_tasks(self, self.__log)
-    for i, t in enumerate(self.__tasks):
-      self.__log.debug(t)
-    self.__reg_tid = self.get_current_thread().tid
-    self.stopped_tid = self.__reg_tid
+    self.__tasks = None
+    self.__tasks_brief = get_tasks_brief(self, self.__log)
+    self.__task_names = [None for i in self.__tasks_brief]
+    self.__task_cpuctx_addrs = [None for i in self.__tasks_brief]
+    self.__current_task_cached_addr = None
+    for i, t in enumerate(self.__tasks_brief):
+      self.__log.debug(f'{t:016x}')
+    self.__reg_tid = None # self.get_current_task().tid
 
   def update_tasks_on_halt(self):
-    self.__tasks = get_tasks(self, self.__log)
-    for i, t in enumerate(self.__tasks):
-      self.__log.debug(t)
-    self.__reg_tid = self.get_current_thread().tid
-    self.stopped_tid = self.__reg_tid
+    self.__tasks = None
+    self.__tasks_brief = get_tasks_brief(self, self.__log)
+    self.__task_names = [None for i in self.__tasks_brief]
+    self.__current_task_cached_addr = None
+    for i, t in enumerate(self.__tasks_brief):
+      self.__log.debug(f'{t:016x}')
+    self.__reg_tid = None # self.get_current_task().tid
 
   def disconnect(self):
     if self.__t:
@@ -130,7 +156,7 @@ class JTAGBackend:
     self.__t.step()
 
   def interrupt(self) -> None:
-    self.__log.into('interrupt')
+    self.__log.info('interrupt')
     self.__t.halt()
 
   def wait_stop(self) -> bool:
@@ -139,26 +165,32 @@ class JTAGBackend:
       self.update_tasks_on_halt()
     return halted
 
+  def get_reg_tid(self):
+    if self.__reg_tid is None:
+      self.__reg_tid = self.get_current_task_tid()
+    return self.__reg_tid
+
   def set_reg_tid(self, tid):
     if tid == 0:
-      self.__reg_tid = self.get_current_thread().tid
+      self.__reg_tid = self.get_current_task_tid()
     else:
       self.__reg_tid = tid
     self.__log.debug(f'current tid for \'g\' ops set to \'{self.__reg_tid}\'')
 
-  def read_all_registers(self) -> bytes:
-    self.__log.debug(f'read_all_registers from tid {self.__reg_tid}')
-    if self.__reg_tid == self.get_current_thread().tid:
+  def read_all_registers(self):
+    reg_tid = self.get_reg_tid()
+    self.__log.debug(f'read_all_registers from tid {reg_tid}')
+    if reg_tid == self.get_current_task_tid():
       regs = self.__t.dump_regs()[0]
     else:
-      t = self.get_thread_by_tid(self.__reg_tid)
-      regs_raw = self.read_mem(t.cpuctx, AARCH64_REGSET_SIZE)
+      cpuctx = self.get_task_cpuctx_addr(reg_tid)
+      regs_raw = self.read_mem(cpuctx, AARCH64_REGSET_SIZE)
       regs = {}
       for r in REG_ORDER:
         regs[r] = int.from_bytes(regs_raw[:8], 'little')
         regs_raw = regs_raw[8:]
       if self.__log.getEffectiveLevel() == logging.DEBUG:
-        self.__log.debug(f'TID {self.__reg_tid} regs:')
+        self.__log.debug(f'TID {reg_tid} regs:')
         for k,v in regs.items():
           self.__log.debug(f'  {k}: 0x{v:016x}')
     b = bytearray()
@@ -260,7 +292,7 @@ class JTAGBackend:
     return self.__t.breakpoint(addr, kind, add=False, hardware=True)
 
   def get_all_tids(self):
-    return [i.tid for i in self.__tasks]
+    return [i + 1 for i, _ in enumerate(self.__tasks_brief)]
 
   def get_thread_by_tid(self, tid):
     for i in self.__tasks:
@@ -269,12 +301,39 @@ class JTAGBackend:
     return None
 
   def get_thread_name(self, tid):
-    return self.get_thread_by_tid(tid).name
+    if self.__task_names[tid - 1] is None:
+      tasks_addr = int(os_json['tasks_array'], 16)
+      task_size = os_json['task_size']
+      task_offset_name = os_json['task_offset_name']
+      task_name_addr = tasks_addr + (tid - 1) * task_size + task_offset_name
+      rawbytes = self.read_mem(task_name_addr, 16)
+      task_name = rawbytes.split(b'\x00', 1)[0].decode('ascii')
+      print(f'task name is {task_name}')
+      self.__task_names[tid - 1] = task_name
+    return self.__task_names[tid - 1]
 
-  def get_current_thread(self):
-    for i in self.__tasks:
-      if i.is_current:
-        return i
+  def get_current_task_tid(self):
+    if self.__current_task_cached_addr is None:
+      current_task_addr_addr = int(os_json['task_current'], 16)
+      rawbytes = self.read_mem(current_task_addr_addr, 8)
+      self.__current_task_cached_addr = int.from_bytes(rawbytes, 'little')
+    assert(self.__current_task_cached_addr)
+    tasks_addr = int(os_json['tasks_array'], 16)
+    task_size = os_json['task_size']
+    return int((self.__current_task_cached_addr - tasks_addr) / task_size) + 1
+
+  def get_task_cpuctx_addr(self, tid):
+    if self.__task_cpuctx_addrs[tid - 1] is None:
+      tasks_addr = int(os_json['tasks_array'], 16)
+      task_size = os_json['task_size']
+      cpuctx_offset = os_json['task_offset_cpuctx']
+      cpuctx_addr_addr = tasks_addr + (tid - 1) * task_size + cpuctx_offset
+      rawbytes = self.read_mem(cpuctx_addr_addr, 8)
+      self.__task_cpuctx_addrs[tid - 1] = int.from_bytes(rawbytes, 'little')
+    return self.__task_cpuctx_addrs[tid - 1]
+
+
+  def get_current_task(self):
     return None
 
 
@@ -329,7 +388,7 @@ class RSPServer:
 
   def send_stop_packet(self, breakpoint):
     sig = 5 # TRAP
-    tid = self.backend.stopped_tid
+    tid = self.backend.get_current_task_tid()
     packet = f'T{sig:02x}thread:{tid:02};'
     if breakpoint:
       packet += 'reason:swbreak;'
@@ -522,7 +581,7 @@ class RSPServer:
     self.send_packet('Text=0;Data=0;Bss=0')
 
   def on_q_current_thread(self, cmd):
-    tid = self.backend.get_current_thread().tid
+    tid = self.backend.get_current_task_tid()
     self.send_packet(f"QC{tid:x}")
 
   def on_q_thread_alive(self, cmd):
