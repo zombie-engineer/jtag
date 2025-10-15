@@ -17,17 +17,48 @@ import json
 os_json = None
 
 class OsTask:
-  def __init__(self, tid, addr, name, cpuctx, current):
-    self.tid = tid
-    self.address = addr
-    self.name = name
-    self.cpuctx = cpuctx
-    self.is_current = current
+  def __init__(self, backend, log, index, addr, name, cpuctx_addr):
+    self.__backend = backend
+    self.__log = log
+    self.__index = index
+    self.__addr = addr
+    self.__name = name
+    self.__cpuctx_addr = cpuctx_addr
+
+  def read_task_field(self, field_name):
+    num_bytes = {
+      'cpuctx' : 8,
+      'name' : 16
+    }[field_name]
+
+    offset = os_json[f'task_offset_{field_name}']
+    addr = self.__addr + offset
+    rawbytes = self.__backend.read_mem(addr, num_bytes)
+    if field_name in ['cpuctx']:
+      result = int.from_bytes(rawbytes, 'little')
+      return result
+    if field_name == 'name':
+      return rawbytes.split(b'\x00', 1)[0].decode('ascii')
+
+  def get_tid(self):
+    return self.__index + 1
+
+  def get_addr(self):
+    return self.__addr
+
+  def get_cpuctx_addr(self):
+    if self.__cpuctx_addr is None:
+      self.__cpuctx_addr = self.read_task_field('cpuctx')
+    return self.__cpuctx_addr
+
+  def get_name(self):
+    if self.__name is None:
+      self.name = self.read_task_field('name')
+    return self.__name
 
   def __repr__(self):
-    result = '* ' if self.is_current else ''
-    result += f'tid:{self.tid} addr:0x{self.address:016x}'
-    result += f' "{self.name}" ctx:0x{self.cpuctx:016x}'
+    result += f'tid:{self.get_tid()} addr:0x{self.__addr:016x}'
+    result += f' "{self.__name}" ctx:0x{self.__cpuctx_addr:016x}'
     return result
 
 
@@ -62,61 +93,6 @@ def from_hex(s: str) -> bytes:
 def to_word_aligned(val, word_size):
   return int((val + word_size - 1) / word_size) * word_size
 
-def get_tasks_brief(backend, log):
-  tasks_addr = int(os_json['tasks_array'], 16)
-  task_size = os_json['task_size']
-  task_current = int(os_json['task_current'], 16)
-  task_offset_name = os_json['task_offset_name']
-  task_offset_cpuctx = os_json['task_offset_cpuctx']
-  # task_current_addr = backend.read_mem(task_current, 8)
-  tasks = [
-  ]
-
-  for i in range(12):
-    memaddr_cpuctx_addr = tasks_addr + i * task_size + task_offset_cpuctx
-    rawbytes = backend.read_mem(memaddr_cpuctx_addr, 8)
-    cpuctx_addr = int.from_bytes(rawbytes, 'little')
-    print(f'{memaddr_cpuctx_addr:016x}: {cpuctx_addr:016x}')
-    if not cpuctx_addr:
-      break
-
-    tasks.append(cpuctx_addr)
-  return tasks
-
-def get_tasks(backend, log):
-  tasks_addr = int(os_json['tasks_array'], 16)
-  task_size = os_json['task_size']
-  task_current = int(os_json['task_current'], 16)
-  task_offset_name = os_json['task_offset_name']
-  task_offset_id = os_json['task_offset_id']
-  task_offset_cpuctx = os_json['task_offset_cpuctx']
-
-  task_current_addr = backend.read_mem(task_current, 8)
-  task_current_addr = int.from_bytes(task_current_addr, 'little')
-  log.debug(f'current_task: 0x{task_current_addr:016x}')
-
-  tasks = [
-  ]
-
-  for i in range(12):
-    task_addr = tasks_addr + i * task_size
-    task_raw = backend.read_mem(task_addr, task_size)
-    task_name = task_raw[task_offset_name: task_offset_name + 16]
-    task_name = task_name.split(b'\x00', 1)
-    task_name = task_name[0].decode('ascii')
-    if len(task_name) == 0:
-      break
-    task_id = task_raw[task_offset_id: task_offset_id + 4]
-    task_id = int.from_bytes(task_id, 'little') + 1
-    task_cpuctx = task_raw[task_offset_cpuctx: task_offset_cpuctx + 8]
-    task_cpuctx = int.from_bytes(task_cpuctx, 'little')
-    current = task_addr == task_current_addr
-    log.info(f'found task, tid:{task_id}, name:"{task_name}"')
-    tasks.append(OsTask(task_id, task_addr, task_name, task_cpuctx,
-      current))
-
-  return tasks
-
 
 class JTAGBackend:
   def __init__(self, target: control.Target, logger):
@@ -124,23 +100,27 @@ class JTAGBackend:
     self.__t = target
     self.__t.init()
     self.__t.halt()
-    self.__tasks = None
-    self.__tasks_brief = get_tasks_brief(self, self.__log)
-    self.__task_names = [None for i in self.__tasks_brief]
-    self.__task_cpuctx_addrs = [None for i in self.__tasks_brief]
-    self.__current_task_cached_addr = None
-    for i, t in enumerate(self.__tasks_brief):
-      self.__log.debug(f'{t:016x}')
-    self.__reg_tid = None # self.get_current_task().tid
+    self.__tasks = self.get_tasks()
+    self.__current_task_addr = None
+    self.__reg_tid = None
+
+  def get_tasks(self):
+    tasks_addr = int(os_json['tasks_array'], 16)
+    task_size = os_json['task_size']
+    tasks = []
+
+    for i in range(12):
+      t = OsTask(self, self.__log, i, tasks_addr + i * task_size, None, None)
+      cpuctx_addr = t.get_cpuctx_addr()
+      if not cpuctx_addr:
+        break
+      tasks.append(t)
+    return tasks
 
   def update_tasks_on_halt(self):
-    self.__tasks = None
-    self.__tasks_brief = get_tasks_brief(self, self.__log)
-    self.__task_names = [None for i in self.__tasks_brief]
-    self.__current_task_cached_addr = None
-    for i, t in enumerate(self.__tasks_brief):
-      self.__log.debug(f'{t:016x}')
-    self.__reg_tid = None # self.get_current_task().tid
+    self.__tasks = self.get_tasks()
+    self.__current_task_addr = None
+    self.__reg_tid = None
 
   def disconnect(self):
     if self.__t:
@@ -171,10 +151,7 @@ class JTAGBackend:
     return self.__reg_tid
 
   def set_reg_tid(self, tid):
-    if tid == 0:
-      self.__reg_tid = self.get_current_task_tid()
-    else:
-      self.__reg_tid = tid
+    self.__reg_tid = tid if tid else self.get_current_task_tid()
     self.__log.debug(f'current tid for \'g\' ops set to \'{self.__reg_tid}\'')
 
   def read_all_registers(self):
@@ -292,46 +269,26 @@ class JTAGBackend:
     return self.__t.breakpoint(addr, kind, add=False, hardware=True)
 
   def get_all_tids(self):
-    return [i + 1 for i, _ in enumerate(self.__tasks_brief)]
-
-  def get_thread_by_tid(self, tid):
-    for i in self.__tasks:
-      if i.tid == tid:
-        return i
-    return None
+    return [i + 1 for i, _ in enumerate(self.__tasks)]
 
   def get_thread_name(self, tid):
-    if self.__task_names[tid - 1] is None:
-      tasks_addr = int(os_json['tasks_array'], 16)
-      task_size = os_json['task_size']
-      task_offset_name = os_json['task_offset_name']
-      task_name_addr = tasks_addr + (tid - 1) * task_size + task_offset_name
-      rawbytes = self.read_mem(task_name_addr, 16)
-      task_name = rawbytes.split(b'\x00', 1)[0].decode('ascii')
-      print(f'task name is {task_name}')
-      self.__task_names[tid - 1] = task_name
-    return self.__task_names[tid - 1]
-
-  def get_current_task_tid(self):
-    if self.__current_task_cached_addr is None:
-      current_task_addr_addr = int(os_json['task_current'], 16)
-      rawbytes = self.read_mem(current_task_addr_addr, 8)
-      self.__current_task_cached_addr = int.from_bytes(rawbytes, 'little')
-    assert(self.__current_task_cached_addr)
-    tasks_addr = int(os_json['tasks_array'], 16)
-    task_size = os_json['task_size']
-    return int((self.__current_task_cached_addr - tasks_addr) / task_size) + 1
+    return self.__tasks[tid - 1].get_name()
 
   def get_task_cpuctx_addr(self, tid):
-    if self.__task_cpuctx_addrs[tid - 1] is None:
-      tasks_addr = int(os_json['tasks_array'], 16)
-      task_size = os_json['task_size']
-      cpuctx_offset = os_json['task_offset_cpuctx']
-      cpuctx_addr_addr = tasks_addr + (tid - 1) * task_size + cpuctx_offset
-      rawbytes = self.read_mem(cpuctx_addr_addr, 8)
-      self.__task_cpuctx_addrs[tid - 1] = int.from_bytes(rawbytes, 'little')
-    return self.__task_cpuctx_addrs[tid - 1]
+    return self.__tasks[tid - 1].get_cpuctx_addr()
 
+  def get_current_task_tid(self):
+    if self.__current_task_addr is None:
+      current_task_addr_addr = int(os_json['task_current'], 16)
+      rawbytes = self.read_mem(current_task_addr_addr, 8)
+      self.__current_task_addr = int.from_bytes(rawbytes, 'little')
+
+    assert(self.__current_task_addr)
+    tc = OsTask(self, self.__log, 0, self.__current_task_addr, None, None)
+    for t in self.__tasks:
+      if t.get_addr() == self.__current_task_addr:
+        return t.get_tid()
+    assert(False)
 
   def get_current_task(self):
     return None
@@ -581,7 +538,7 @@ class RSPServer:
     self.send_packet('Text=0;Data=0;Bss=0')
 
   def on_q_current_thread(self, cmd):
-    tid = self.backend.get_current_task_tid()
+    tid = self.backend.get_current_task().get_tid()
     self.send_packet(f"QC{tid:x}")
 
   def on_q_thread_alive(self, cmd):
