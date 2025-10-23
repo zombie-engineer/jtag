@@ -8,6 +8,59 @@
 #include "common.h"
 #include <errno.h>
 
+static bool aarch64_reg_get_name(uint32_t reg_id, char *buf, size_t bufsz)
+{
+
+#define SET_AND_CHECK(__v) \
+  *ptr++ = (__v); if (ptr == end) return false;
+
+  char *ptr = buf;
+  char *end = buf + bufsz;
+
+  if (ptr == end)
+    return false;
+
+  if (reg_id >= AARCH64_CORE_REG_X0 && reg_id <= AARCH64_CORE_REG_X30) {
+    SET_AND_CHECK('x');
+
+    if (reg_id == AARCH64_CORE_REG_X30) {
+      SET_AND_CHECK('3');
+      SET_AND_CHECK('0');
+    }
+    else if (reg_id >= AARCH64_CORE_REG_X20) {
+      SET_AND_CHECK('2');
+      SET_AND_CHECK('0' + reg_id - AARCH64_CORE_REG_X20);
+    } else if (reg_id >= AARCH64_CORE_REG_X10) {
+      SET_AND_CHECK('1');
+      SET_AND_CHECK('0' + reg_id - AARCH64_CORE_REG_X10);
+    } else {
+      SET_AND_CHECK('0' + reg_id);
+    }
+  }
+  else if (reg_id == AARCH64_CORE_REG_PC) {
+    SET_AND_CHECK('p');
+    SET_AND_CHECK('c');
+  }
+  else if (reg_id == AARCH64_CORE_REG_SP) {
+    SET_AND_CHECK('s');
+    SET_AND_CHECK('p');
+  }
+  else
+    return false;
+
+  *ptr = 0;
+#undef SET_AND_CHECK
+  return true;
+}
+
+static void aarch64_regcache_reset_on_halt(struct aarch64 *a)
+{
+  int i;
+
+  for (i = 0; i < ARRAY_SIZE(a->ctx.regcache); ++i)
+    a->ctx.regcache[i].state = REG_STATE_INVALID;
+}
+
 static inline void aarch64_update_halt_reason(struct aarch64 *a)
 {
   int status = aarch64_edscr_get_status(a->regs.edscr);
@@ -165,6 +218,7 @@ static int aarch64_on_debug_entry(struct aarch64 *a, uint32_t baseaddr,
     return ret;
 
   cti_ack2(a->dap, cti_baseaddr, CTI_EVENT_HALT);
+  aarch64_regcache_reset_on_halt(a);
   aarch64_update_halt_reason(a);
   return 0;
 }
@@ -237,86 +291,110 @@ int aarch64_halt(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
       &a->regs.edprsr);
   } while (!aarch64_edprsr_is_halted(a->regs.edprsr));
 
+  aarch64_regcache_reset_on_halt(a);
   ret = aarch64_check_handle_sticky_error(a, baseaddr);
   aarch64_update_halt_reason(a);
   return ret;
 }
 
-static inline bool aarch64_ctx_get_reg(struct aarch64_context *ctx,
+static inline int aarch64_regcache_read(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *out)
 {
-  if (reg_id <= AARCH64_CORE_REG_X30) {
-    *out = ctx->x0_30[reg_id];
-    return true;
-  }
+  int ret;
+  struct reg *r;
 
-  if (reg_id == AARCH64_CORE_REG_PC) {
-    *out = ctx->pc;
-    return true;
-  }
+  if (reg_id <= AARCH64_STATE_REGS) {
+    r = &a->ctx.regcache[reg_id];
 
-  if (reg_id == AARCH64_CORE_REG_SP) {
-    *out = ctx->sp;
-    return true;
+    if (r->state == REG_STATE_INVALID) {
+      ret = aarch64_reg_read_64(a, baseaddr, reg_id, &r->value);
+      if (ret)
+        return ret;
+      r->state = REG_STATE_CLEAN;
+    }
+
+    *out = r->value;
+    return 0;
   }
 
   if (reg_id == AARCH64_CORE_REG_CPSR) {
-    *out = ctx->pstate;
-    return true;
+    *out = a->ctx.pstate;
+    return 0;
   }
 
   if (reg_id == AARCH64_CORE_REG_FPSR) {
-    *out = ctx->fpsr;
-    return true;
+    *out = a->ctx.fpsr;
+    return 0;
   }
 
   if (reg_id == AARCH64_CORE_REG_FPCR) {
-    *out = ctx->fpcr;
-    return true;
+    *out = a->ctx.fpcr;
+    return 0;
   }
 
-  return false;
+  return -EINVAL;
+}
+
+static int aarch64_regcache_mark_modified(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id)
+{
+  int ret;
+  struct reg *r;
+
+  if (reg_id > AARCH64_STATE_REGS)
+    return -EINVAL;
+
+  r = &a->ctx.regcache[reg_id];
+
+  if (r->state == REG_STATE_INVALID) {
+      ret = aarch64_reg_read_64(a, baseaddr, reg_id, &r->value);
+      if (ret)
+        return ret;
+  }
+
+  r->state = REG_STATE_MODIFIED;
+  return 0;
 }
 
 static inline bool aarch64_ctx_set_reg(struct aarch64_context *ctx,
   uint32_t reg_id, uint64_t value)
 {
-  if (reg_id <= AARCH64_CORE_REG_X30) {
-    ctx->x0_30[reg_id] = value;
-    goto dirty;
-  }
-  if (reg_id == AARCH64_CORE_REG_PC) {
-    ctx->pc = value;
-    goto dirty;
-  }
-  if (reg_id == AARCH64_CORE_REG_SP) {
-    ctx->sp = value;
-    goto dirty;
+  struct reg *r;
+
+  if (reg_id > AARCH64_STATE_REGS)
+    return false;
+
+  r = &ctx->regcache[reg_id];
+
+  if (r->value != value || r->state != REG_STATE_CLEAN) {
+    r->value = value;
+    r->state = REG_STATE_MODIFIED;
   }
 
-  return false;
-
-dirty:
-  ctx->dirty_mask |= 1ull << reg_id;
   return true;
 }
+
+static int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t value);
 
 int aarch64_restore_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg_id)
 {
   int ret;
-  uint64_t value;
+  struct reg *r;
 
-  if (!(a->ctx.dirty_mask & (1<<reg_id)))
+  if (reg_id > AARCH64_STATE_REGS)
+    return -EINVAL;
+
+  r = &a->ctx.regcache[reg_id];
+
+  if (r->state != REG_STATE_MODIFIED)
     return 0;
 
-  if (!aarch64_ctx_get_reg(&a->ctx, reg_id, &value))
-    return -EIO;
-
-  ret = aarch64_write_core_reg(a, baseaddr, reg_id, value, false);
+  ret = aarch64_write_core_reg(a, baseaddr, reg_id, r->value);
   if (ret)
     return ret;
 
-  a->ctx.dirty_mask &= ~(1<<reg_id);
+  r->state = REG_STATE_CLEAN;
   return ret;
 }
 
@@ -325,14 +403,11 @@ int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr)
   int ret;
   uint32_t i;
 
-  if (!a->ctx.dirty_mask)
-    return 0;
-
   /*
    * Because we are going to restore something, we are going to dirty X0, so
    * exclude it now to restore it as the last step
    */
-  for (i = 1; i < AARCH64_STATE_REGS && a->ctx.dirty_mask != 1; ++i) {
+  for (i = AARCH64_CORE_REG_X1; i < AARCH64_STATE_REGS; ++i) {
     ret = aarch64_restore_reg(a, baseaddr, i);
     if (ret)
       return ret;
@@ -402,69 +477,40 @@ int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr)
   if (ret)
     return ret;
 
+  aarch64_regcache_reset_on_halt(a);
   aarch64_update_halt_reason(a);
 
   return aarch64_check_handle_sticky_error(a, baseaddr);
 }
 
-static int aarch64_get_cache_info(struct aarch64 *a, uint32_t baseaddr)
+static int aarch64_get_cache_line_info(struct aarch64 *a, uint32_t baseaddr,
+    int *dcache_line_size, int *icache_line_size)
 {
   int ret;
-  uint64_t ctr_el0, clidr_el1, csselr_el1;
+  uint64_t ctr_el0;
 
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_CTR_EL0, &ctr_el0);
-  if (ret)
-    return ret;
+  if (!a->cache_line_fetched) {
+    ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_CTR_EL0, &ctr_el0);
+    if (ret)
+      return ret;
 
-  a->icache_line_sz = 4ul << (ctr_el0 & 0xf);
-  a->dcache_line_sz = 4ul << ((ctr_el0 >> 16) & 0xf);
+    a->icache_line_sz = 4ul << (ctr_el0 & 0xf);
+    a->dcache_line_sz = 4ul << ((ctr_el0 >> 16) & 0xf);
+  }
 
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_CLIDR_EL1,
-    &clidr_el1);
-  if (ret)
-    return ret;
-
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_CSSELR_EL1,
-    &csselr_el1);
-  if (ret)
-    return ret;
+  *dcache_line_size = a->dcache_line_sz;
+  *icache_line_size = a->icache_line_sz;
 
   return 0;
 }
-
-#if 0
-static int aarch64_cache_flush_invalidate_flush(struct aarch64 *a,
-  uint32_t baseaddr, uint64_t start_addr, uint64_t end_addr)
-{
-  int ret = 0;
-  const uint32_t opcode_dc_civac_x0 = OPCODE_DC_CIVAC_X0;
-  uint64_t addr_mask = ~(uint64_t)(a->icache_line_sz - 1);
-  uint64_t cache_line_addr = start_addr & addr_mask;
-
-  if (!aarch64_set_normal_mode(a, baseaddr))
-    return -EIO;
-
-  while (cache_line_addr < end_addr) {
-    ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0,
-      cache_line_addr);
-
-    if (ret)
-      return ret;
-
-    ret = aarch64_exec(a, baseaddr, &opcode_dc_civac_x0, 1);
-    if (ret)
-      return ret;
-
-    cache_line_addr += a->icache_line_sz;
-  }
-  return ret;
-}
-#endif
 
 static int aarch64_breakpoint_sw_cache_sync(struct aarch64 *a,
   uint32_t baseaddr, uint64_t addr)
 {
   int ret;
+
+  int dcache_line_sz;
+  int icache_line_sz;
 
   if (!aarch64_set_normal_mode(a, baseaddr))
     return -EIO;
@@ -485,6 +531,12 @@ static int aarch64_breakpoint_sw_cache_sync(struct aarch64 *a,
   if (!a->ctx.mmu_on)
     return 0;
 
+  ret = aarch64_get_cache_line_info(a, baseaddr, &dcache_line_sz,
+    &icache_line_sz);
+
+  if (ret)
+    return ret;
+
   /* Only required if MMU is enabled, so caches are enabled as well */
   /* NOTE: Need to check, maybe ISB ISH are needed if MMU is not enable */
   const uint64_t dcache_addr_mask = ~(uint64_t)(a->dcache_line_sz - 1);
@@ -500,7 +552,7 @@ static int aarch64_breakpoint_sw_cache_sync(struct aarch64 *a,
 
   /* X0 = D-cache line address for instruction address */
   ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0,
-    dcache_line_addr, true);
+    dcache_line_addr);
   if (ret)
     return ret;
 
@@ -511,7 +563,7 @@ static int aarch64_breakpoint_sw_cache_sync(struct aarch64 *a,
 
   /* X0 = I-cache line address for instruction address */
   ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0,
-    icache_line_addr, true);
+    icache_line_addr);
   if (ret)
     return ret;
 
@@ -607,6 +659,7 @@ int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
 int aarch64_reg_read_64(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
   uint64_t *out_reg)
 {
+  int ret;
   uint32_t tmp_lo = 0, tmp_hi = 0;
 
   uint32_t instructions[2];
@@ -624,7 +677,9 @@ int aarch64_reg_read_64(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
     /* msr dbgdtr_el0, x0 */
     instructions[1] = AARCH64_I_MSR(DBGDTR_EL0, X0);
     num_i = 2;
-    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
+    ret = aarch64_regcache_mark_modified(a, baseaddr, AARCH64_CORE_REG_X0);
+    if (ret)
+      return ret;
   }
 
   for (int i = 0; i < num_i; ++i) {
@@ -651,19 +706,23 @@ int aarch64_reg_read_64(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
   return 0;
 }
 
-int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t reg_id, uint64_t value, bool make_dirty)
+static int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t value)
 {
+  int ret;
   uint32_t instructions[2];
   int num_i;
+
+  if (reg_id <= AARCH64_STATE_REGS) {
+    ret = aarch64_regcache_mark_modified(a, baseaddr, reg_id);
+    if (ret)
+      return ret;
+  }
 
   if (reg_id <= AARCH64_CORE_REG_X30) {
     /* msr dbgdtr_el0, xN, where N==reg*/
     instructions[0] = AARCH64_INSTR_MRS_DBGDTR_EL0(reg_id);
     num_i = 1;
-
-    if (make_dirty)
-      a->ctx.dirty_mask |= 1 << reg_id;
   }
   else if (reg_id == AARCH64_CORE_REG_PC) {
     /* mrs x0, dbgdtr_el0, same as x0 = dbgdtr_el0 */
@@ -671,7 +730,9 @@ int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
     /* msr dlr_el0, x0 */
     instructions[1] = AARCH64_I_MSR(DLR_EL0, X0);
     num_i = 2;
-    a->ctx.dirty_mask |= 1 << AARCH64_CORE_REG_X0;
+    ret = aarch64_regcache_mark_modified(a, baseaddr, AARCH64_CORE_REG_X0);
+    if (ret)
+      return ret;
   }
   else
     return -EINVAL;
@@ -699,64 +760,26 @@ int aarch64_write_cached_reg(struct aarch64 *a, uint32_t baseaddr,
 int aarch64_read_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *value)
 {
-  return aarch64_ctx_get_reg(&a->ctx, reg_id, value) ? 0 : -EIO;
+  return aarch64_regcache_read(a, baseaddr, reg_id, value);
 }
 
-int aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr)
+int aarch64_iter_state_regs(struct aarch64 *a, uint32_t baseaddr,
+  reg_iter_cb_t cb, void *cb_arg)
 {
   int ret;
-  uint64_t reg;
+  uint32_t reg_id;
+  char regname[4];
+  uint64_t value;
 
-  struct aarch64_context *c = &a->ctx;
-
-  c->dirty_mask = 0;
-
-  for (int i = AARCH64_CORE_REG_X0; i <= AARCH64_CORE_REG_X30; ++i) {
-    ret = aarch64_reg_read_64(a, baseaddr, i, &reg);
+  for (reg_id = 0; reg_id < AARCH64_STATE_REGS; ++reg_id) {
+    ret = aarch64_regcache_read(a, baseaddr, reg_id, &value);
     if (ret)
       return ret;
-    c->x0_30[i] = reg;
+
+    if (!aarch64_reg_get_name(reg_id, regname, sizeof(regname)))
+      return -EFAULT;
+    cb(regname, value, cb_arg);
   }
-
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_PC, &reg);
-  if (ret)
-    return ret;
-
-  c->pc = reg;
-
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_SP, &reg);
-  if (ret)
-    return ret;
-
-  c->sp = reg;
-  c->el = aarch64_edscr_get_el(a->regs.edscr);
-
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_SCTLR_EL1, &reg);
-  if (ret)
-    return ret;
-
-  c->sctlr_el1 = reg;
-  c->mmu_on = reg & 1;
-
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_DSPSR_EL0,
-    &c->pstate);
-  if (ret)
-    return ret;
-
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_FPSR, &c->fpsr);
-  if (ret)
-    return ret;
-
-  ret = aarch64_reg_read_64(a, baseaddr, AARCH64_CORE_REG_VBAR_EL1, &reg);
-  if (ret)
-    return ret;
-
-  c->vbar_el1 = reg;
-
-  ret = aarch64_get_cache_info(a, baseaddr);
-  if (ret)
-    return ret;
-
   return 0;
 }
 
@@ -767,7 +790,7 @@ int aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
   if (!aarch64_set_normal_mode(a, baseaddr))
     return -EIO;
 
-  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr, true);
+  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr);
   if (ret)
     return ret;
 
@@ -801,7 +824,7 @@ int aarch64_read_mem_once(struct aarch64 *a, uint32_t baseaddr,
   if (!aarch64_set_normal_mode(a, baseaddr))
     return -EIO;
 
-  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr, true);
+  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr);
   if (ret)
     return ret;
 
@@ -860,7 +883,7 @@ int aarch64_mem_read_fast(struct aarch64 *a, uint32_t baseaddr,
     return -EIO;
 
   /* Set starting address to X0 */
-  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr, true);
+  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr);
   if (ret)
     return ret;
 
@@ -903,8 +926,13 @@ int aarch64_mem_read_fast(struct aarch64 *a, uint32_t baseaddr,
   adiv5_mem_ap_read_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
     (uint32_t *)&value);
 
-  a->ctx.dirty_mask |= 1ull << AARCH64_CORE_REG_X0;
-  a->ctx.dirty_mask |= 1ull << AARCH64_CORE_REG_X1;
+
+  ret = aarch64_regcache_mark_modified(a, baseaddr, AARCH64_CORE_REG_X0);
+  if (ret)
+    return ret;
+  ret = aarch64_regcache_mark_modified(a, baseaddr, AARCH64_CORE_REG_X1);
+  if (ret)
+    return ret;
 
   /*
    * Next read from DBGDTRTX_EL0 will trigger first 4 bytes and then next 4
@@ -954,11 +982,11 @@ int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   if (!aarch64_set_normal_mode(a, baseaddr))
     return -EIO;
 
-  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr, true);
+  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X0, addr);
   if (ret)
     return ret;
 
-  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X1, value, true);
+  ret = aarch64_write_core_reg(a, baseaddr, AARCH64_CORE_REG_X1, value);
   if (ret)
     return ret;
 
@@ -985,6 +1013,7 @@ int aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
 {
   uint32_t reg;
 
+  a->cache_line_fetched = false;
   a->dap = d;
   /*
    * Unlock Debug lock, to verify - readback the value in EDPRSR.OSLK, with 0

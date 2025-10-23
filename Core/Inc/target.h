@@ -8,7 +8,6 @@
 #define NUM_BREAKPOINTS_SW 16
 #define NUM_BREAKPOINTS_HW 4
 
-
 struct target_core {
   struct aarch64 a64;
 
@@ -53,6 +52,9 @@ int target_reg_write_64(struct target *t, uint32_t reg_id, uint64_t value,
 
 int target_reg_read_64(struct target *t, uint32_t reg_id, uint64_t *out,
   bool direct);
+
+int target_iter_regs(struct target *t, int core_idx, reg_iter_cb_t cb,
+  void *arg);
 
 int target_exec(struct target *t, const uint32_t *instr, int count);
 void target_get_halt_reason(struct target *t, const char **str);

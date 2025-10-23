@@ -37,12 +37,15 @@ int target_core_halt(struct target_core *c, struct breakpoint *sw_breakpoints,
     return ret;
 
   c->halted = true;
-  ret = aarch64_fetch_context(&c->a64, c->debug);
-  if (ret)
-    return ret;
 
   return target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
     true);
+}
+
+static int target_core_iter_regs(struct target_core *c,
+  reg_iter_cb_t cb, void *arg)
+{
+  return aarch64_iter_state_regs(&c->a64, c->debug, cb, arg);
 }
 
 static int target_core_exec(struct target_core *c, const uint32_t *const instr,
@@ -69,10 +72,6 @@ static int target_core_check_halted(struct target_core *c,
 
   c->halted = true;
 
-  ret = aarch64_fetch_context(&c->a64, c->debug);
-  if (ret)
-    return ret;
-
   return target_core_set_sw_breakpoints(c, sw_breakpoints, num_breakpoints,
     true);
 }
@@ -86,6 +85,7 @@ int target_core_resume(struct target_core *c,
   int ret;
   struct breakpoint *b;
   int i;
+  uint64_t pc;
 
   if (!c->halted)
     return -EINVAL;
@@ -94,7 +94,12 @@ int target_core_resume(struct target_core *c,
     b = &sw_breakpoints[i];
     if (!b->busy)
       continue;
-    if (b->addr == c->a64.ctx.pc) {
+
+    ret = aarch64_read_cached_reg(&c->a64, c->debug, AARCH64_CORE_REG_PC, &pc);
+    if (ret)
+      return ret;
+
+    if (b->addr == pc) {
       ret = target_core_step(c, sw_breakpoints, num_breakpoints);
       if (ret)
         return ret;
@@ -133,7 +138,7 @@ static int target_core_step(struct target_core *c,
   if (ret)
     return ret;
 
-  return aarch64_fetch_context(&c->a64, c->debug);
+  return 0;
 }
 
 int target_core_breakpoint(struct target_core *c, bool remove, bool hardware,
@@ -149,6 +154,12 @@ int target_halt(struct target *t)
 {
   return target_core_halt(&t->core[0], t->breakpoints_sw,
     ARRAY_SIZE(t->breakpoints_sw));
+}
+
+int target_iter_regs(struct target *t, int core_idx, reg_iter_cb_t cb,
+  void *arg)
+{
+  return target_core_iter_regs(&t->core[core_idx], cb, arg);
 }
 
 int target_exec(struct target *t, const uint32_t *instr, int count)

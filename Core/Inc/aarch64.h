@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include <io_api.h>
 #include <breakpoint.h>
+#include <reg.h>
 
 #define AARCH64_CORE_REG_X0   0
 #define AARCH64_CORE_REG_X1   1
@@ -41,7 +42,7 @@
 #define AARCH64_CORE_REG_CPSR 33
 #define AARCH64_CORE_REG_FPSR 34
 #define AARCH64_CORE_REG_FPCR 35
-#define AARCH64_STATE_REGS AARCH64_CORE_REG_SP
+#define AARCH64_STATE_REGS (AARCH64_CORE_REG_SP + 1)
 
 #define AARCH64_CORE_REG_SCTLR_EL1  36
 #define AARCH64_CORE_REG_ESR_EL2    37
@@ -71,12 +72,9 @@ typedef enum {
 struct adiv5_dap;
 
 struct aarch64_context {
-  uint64_t pc;
-  uint64_t sp;
-  uint64_t x0_30[31];
-  uint64_t sctlr_el1;
-  uint64_t vbar_el1;
-  uint64_t dirty_mask;
+  struct reg regcache[AARCH64_STATE_REGS];
+  struct reg sctlr_el1;
+  struct reg vbar_el1;
   int el;
   uint64_t pstate;
   uint64_t fpsr;
@@ -117,6 +115,7 @@ struct aarch64 {
   struct adiv5_dap *dap;
   struct aarch64_dbg_regs_cache regs;
   struct aarch64_context ctx;
+  bool cache_line_fetched;
   int dcache_line_sz;
   int icache_line_sz;
   aarch64_halt_reason_t halt_reason;
@@ -152,7 +151,8 @@ void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
 int aarch64_exec(struct aarch64 *a, uint32_t baseaddr,
   const uint32_t *const instr, int num);
 
-int aarch64_fetch_context(struct aarch64 *a, uint32_t baseaddr);
+int aarch64_iter_state_regs(struct aarch64 *a, uint32_t baseaddr,
+  reg_iter_cb_t cb, void *arg);
 
 int aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
   const uint32_t *src, size_t num_words);
@@ -160,8 +160,6 @@ int aarch64_write_mem32(struct aarch64 *a, uint32_t baseaddr, uint64_t addr,
 int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
   uint64_t addr, uint32_t value);
 
-int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t reg_id, uint64_t value, bool make_dirty);
 int aarch64_read_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *value);
 int aarch64_write_cached_reg(struct aarch64 *a, uint32_t baseaddr,

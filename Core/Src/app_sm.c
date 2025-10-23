@@ -644,26 +644,34 @@ static int app_process_breakpoint(struct target *t, struct cmd *c)
   return target_breakpoint(t, remove, hardware, value);
 }
 
+struct dump_regs_iter {
+  int core_idx;
+};
+
+static void dump_regs_iter_cb(const char *name, uint64_t value, void *arg)
+{
+  struct dump_regs_iter *iter = arg;
+  msg("%d,%s," VALUE64_FMT "\r\n", iter->core_idx, name, VALUE64_ARG(value));
+}
+
 static int app_process_dump_regs(struct target *t)
 {
-  int i, j;
+  int ret;
+  int core_idx;
   struct target_core *c;
-  struct aarch64_context *core_ctx;
+  struct dump_regs_iter iter;
 
   CHECK_ATTACHED();
 
-  for (i = 0; i < ARRAY_SIZE(t->core); ++i) {
-    c = &t->core[i];
+  for (core_idx = 0; core_idx < ARRAY_SIZE(t->core); ++core_idx) {
+    c = &t->core[core_idx];
     if (!c->halted)
       continue;
 
-    core_ctx = &c->a64.ctx;
-    for (j = 0; j < ARRAY_SIZE(core_ctx->x0_30); ++j)
-      msg("%d,x%d," VALUE64_FMT "\r\n", i, j, VALUE64_ARG(core_ctx->x0_30[j]));
-
-    msg("%d, sp," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->sp));
-    msg("%d, pc," VALUE64_FMT "\r\n", i, VALUE64_ARG(core_ctx->pc));
-    msg("%d, pstate, 0x%016x\r\n", i, (uint32_t)core_ctx->pstate);
+    iter.core_idx = core_idx;
+    ret = target_iter_regs(t, core_idx, dump_regs_iter_cb, &iter);
+    if (ret)
+      return ret;
   }
 
   return 0;
