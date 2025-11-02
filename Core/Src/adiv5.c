@@ -26,7 +26,14 @@
 #define AP_REG_ADDR_BASE 0xf8
 #define AP_REG_ADDR_IDR  0xfc
 
-bool last_success = true;
+#define CTRL_STAT_CDBGRSTREQ   (1<<26)
+#define CTRL_STAT_CDBGRSTACK   (1<<27)
+#define CTRL_STAT_CDBGPWRUPREQ (1<<28)
+#define CTRL_STAT_CDBGPWRUPACK (1<<29)
+#define CTRL_STAT_CSYSPWRUPREQ (1<<30)
+#define CTRL_STAT_CSYSPWRUPACK (1<<31)
+
+#define CDBGRSTACK_NUM_REPS 5000
 
 void adiv5_write_ir(struct adiv5_dap *d, uint8_t ir)
 {
@@ -40,15 +47,6 @@ void adiv5_write_ir(struct adiv5_dap *d, uint8_t ir)
   jtag_to_state(JTAG_STATE_RUN_TEST_IDLE);
   d->ir = ir;
 }
-
-#define CTRL_STAT_CDBGRSTREQ   (1<<26)
-#define CTRL_STAT_CDBGRSTACK   (1<<27)
-#define CTRL_STAT_CDBGPWRUPREQ (1<<28)
-#define CTRL_STAT_CDBGPWRUPACK (1<<29)
-#define CTRL_STAT_CSYSPWRUPREQ (1<<30)
-#define CTRL_STAT_CSYSPWRUPACK (1<<31)
-
-#define CDBGRSTACK_NUM_REPS 5000
 
 static bool adiv5_write_select(struct adiv5_dap *d, int dpbank, int apbank,
   int apsel)
@@ -178,24 +176,12 @@ static bool adiv5_dap_dbg_power_up(struct adiv5_dap *d)
       break;
   }
 
-#if 0
-  if (!adiv5_write_ctr_stat(dap.ctl_stat | CTRL_STAT_CSYSPWRUPREQ))
-    return false;
-
-  while(1) {
-    if (!adiv5_read_ctr_stat(&dap.ctl_stat))
-      return false;
-
-    if (dap.ctl_stat & CTRL_STAT_CSYSPWRUPACK)
-      break;
-  }
-#endif
   return true;
 }
 
 static bool adiv5_dap_dbg_power_down(struct adiv5_dap *d)
 {
-  const uint32_t ack_mask = CTRL_STAT_CSYSPWRUPACK;// | CTRL_STAT_CDBGPWRUPACK;
+  const uint32_t ack_mask = CTRL_STAT_CSYSPWRUPACK;
 
   if (!adiv5_write_ctr_stat(d, 0))
     return false;
@@ -313,39 +299,6 @@ static bool adiv5_mem_ap_init(struct adiv5_dap *d)
   return true;
 }
 
-#define ADIV5_CSW_SIZE_POS     0
-#define ADIV5_CSW_ADDRINCR_POS 4
-
-#define ADIV5_CSW_SIZE_MASK     (7 << ADIV5_CSW_SIZE_POS)
-#define ADIV5_CSW_ADDRINCR_MASK (3 << ADIV5_CSW_ADDRINCR_POS)
-
-#if 0
-bool adiv5_mem_ap_set_csw(struct adiv5_dap *d, int op_size, bool addrinc)
-{
-  uint32_t new_csw = d->csw;
-  new_csw &= ~ADIV5_CSW_SIZE_MASK;
-  new_csw &= ~ADIV5_CSW_ADDRINCR_MASK;
-
-  if (addrinc)
-    new_csw |= (1 << ADIV5_CSW_ADDRINCR_POS) & ADIV5_CSW_ADDRINCR_MASK;
-
-  if (op_size == 1)
-    new_csw |= (0 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
-  else if (op_size == 2)
-    new_csw |= (1 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
-  else if (op_size == 4)
-    new_csw |= (2 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
-  else if (op_size == 8)
-    new_csw |= (3 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
-  else if (op_size == 16)
-    new_csw |= (4 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
-  else if (op_size == 32)
-    new_csw |= (5 << ADIV5_CSW_SIZE_POS) & ADIV5_CSW_SIZE_MASK;
-
-  adiv5_transfer(d, AP, OP_WRITE, AP_REG_ADDR_CSW, new_csw, &d->csw);
-}
-#endif
-
 bool adiv5_dap_init(struct adiv5_dap *d)
 {
   uint32_t reg;
@@ -366,40 +319,14 @@ bool adiv5_dap_init(struct adiv5_dap *d)
   return adiv5_mem_ap_init(d);
 }
 
-#if 0
-bool adiv5_mem_ap_read_word_drw(struct adiv5_dap *d, uint32_t addr,
-  uint32_t *out)
-{
-  uint32_t data = 0;
-  uint32_t check_tar = 0;
-
-  adiv5_transfer_e(d, AP, OP_WRITE, AP_REG_ADDR_TAR, addr, &data);
-  adiv5_transfer_e(d, AP, OP_READ, AP_REG_ADDR_TAR, 0, &check_tar);
-  adiv5_transfer_e(d, AP, OP_READ, AP_REG_ADDR_DRW, 0, out);
-  adiv5_transfer_e(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
-  if (d->ctl_stat & 0x20) {
-    last_success = false;
-    adiv5_transfer_e(d, DP, OP_WRITE, DP_REG_ADDR_CTRL_STAT, d->ctl_stat,
-      &data);
-
-    adiv5_transfer_e(d, DP, OP_READ, DP_REG_ADDR_CTRL_STAT, 0, &d->ctl_stat);
-  }
-  else
-    last_success = true;
-  return true;
-}
-#endif
-
 static inline bool adiv5_check_op_status(struct adiv5_dap *d)
 {
   adiv5_dp_read(CTRL_STAT, &d->ctl_stat);
   if (d->ctl_stat & 0x20) {
-    last_success = false;
     adiv5_dp_write(CTRL_STAT, d->ctl_stat, NULL);
     adiv5_dp_read(CTRL_STAT, &d->ctl_stat);
     return false;
   }
-  last_success = true;
   return true;
 }
 
