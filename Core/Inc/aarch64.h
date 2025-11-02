@@ -124,12 +124,7 @@ struct aarch64 {
 int aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
-bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr);
-
-bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr);
-
-int aarch64_halt(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t cti_baseaddr);
+int aarch64_halt(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr);
 
 int aarch64_check_halted(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
@@ -138,15 +133,13 @@ int aarch64_resume(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr);
 
 int aarch64_restore_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg_id);
+
 int aarch64_restore_before_resume(struct aarch64 *a, uint32_t baseaddr);
 
 int aarch64_step(struct aarch64 *a, uint32_t baseaddr, uint32_t cti_baseaddr);
 
 int aarch64_breakpoint(struct aarch64 *a, uint32_t baseaddr, bool remove,
   bool hardware, struct breakpoint *b);
-
-void aarch64_mess(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t cti_baseaddr);
 
 int aarch64_exec(struct aarch64 *a, uint32_t baseaddr,
   const uint32_t *const instr, int num);
@@ -162,6 +155,7 @@ int aarch64_write_mem32_once(struct aarch64 *a, uint32_t baseaddr,
 
 int aarch64_read_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t *value);
+
 int aarch64_write_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value);
 

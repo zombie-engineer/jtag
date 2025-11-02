@@ -10,7 +10,6 @@
 
 static bool aarch64_reg_get_name(uint32_t reg_id, char *buf, size_t bufsz)
 {
-
 #define SET_AND_CHECK(__v) \
   *ptr++ = (__v); if (ptr == end) return false;
 
@@ -124,7 +123,7 @@ static inline bool aarch64_status_halted(const struct aarch64 *a)
   return aarch64_edprsr_is_halted(a->regs.edprsr);
 }
 
-bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
+static bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
 {
   bool success;
 
@@ -141,7 +140,7 @@ bool aarch64_set_memory_mode(struct aarch64 *a, uint32_t baseaddr)
   return success;
 }
 
-bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr)
+static bool aarch64_set_normal_mode(struct aarch64 *a, uint32_t baseaddr)
 {
   bool success;
 
@@ -207,6 +206,73 @@ static inline int aarch64_check_handle_sticky_error(struct aarch64 *a,
 
   return 0;
 }
+
+static int aarch64_regcache_mark_modified(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id)
+{
+  int ret;
+  struct reg *r;
+
+  if (reg_id > AARCH64_STATE_REGS)
+    return -EINVAL;
+
+  r = &a->ctx.regcache[reg_id];
+
+  if (r->state == REG_STATE_INVALID) {
+      ret = aarch64_reg_read_64(a, baseaddr, reg_id, &r->value);
+      if (ret)
+        return ret;
+  }
+
+  r->state = REG_STATE_MODIFIED;
+  return 0;
+}
+
+static int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
+  uint32_t reg_id, uint64_t value)
+{
+  int ret;
+  uint32_t instructions[2];
+  int num_i;
+
+  if (reg_id <= AARCH64_STATE_REGS) {
+    ret = aarch64_regcache_mark_modified(a, baseaddr, reg_id);
+    if (ret)
+      return ret;
+  }
+
+  if (reg_id <= AARCH64_CORE_REG_X30) {
+    /* msr dbgdtr_el0, xN, where N==reg*/
+    instructions[0] = AARCH64_INSTR_MRS_DBGDTR_EL0(reg_id);
+    num_i = 1;
+  }
+  else if (reg_id == AARCH64_CORE_REG_PC) {
+    /* mrs x0, dbgdtr_el0, same as x0 = dbgdtr_el0 */
+    instructions[0] = AARCH64_I_MRS(X0, DBGDTR_EL0);
+    /* msr dlr_el0, x0 */
+    instructions[1] = AARCH64_I_MSR(DLR_EL0, X0);
+    num_i = 2;
+    ret = aarch64_regcache_mark_modified(a, baseaddr, AARCH64_CORE_REG_X0);
+    if (ret)
+      return ret;
+  }
+  else
+    return -EINVAL;
+
+  adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRRX_EL0,
+    value & 0xffffffff);
+
+  adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
+    (value >> 32) & 0xffffffff);
+
+  for (int i = 0; i < num_i; ++i) {
+    adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
+      instructions[i]);
+  }
+
+  return aarch64_check_handle_sticky_error(a, baseaddr);
+}
+
 
 static int aarch64_on_debug_entry(struct aarch64 *a, uint32_t baseaddr,
   uint32_t cti_baseaddr)
@@ -334,48 +400,6 @@ static inline int aarch64_regcache_read(struct aarch64 *a, uint32_t baseaddr,
 
   return -EINVAL;
 }
-
-static int aarch64_regcache_mark_modified(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t reg_id)
-{
-  int ret;
-  struct reg *r;
-
-  if (reg_id > AARCH64_STATE_REGS)
-    return -EINVAL;
-
-  r = &a->ctx.regcache[reg_id];
-
-  if (r->state == REG_STATE_INVALID) {
-      ret = aarch64_reg_read_64(a, baseaddr, reg_id, &r->value);
-      if (ret)
-        return ret;
-  }
-
-  r->state = REG_STATE_MODIFIED;
-  return 0;
-}
-
-static inline bool aarch64_ctx_set_reg(struct aarch64_context *ctx,
-  uint32_t reg_id, uint64_t value)
-{
-  struct reg *r;
-
-  if (reg_id > AARCH64_STATE_REGS)
-    return false;
-
-  r = &ctx->regcache[reg_id];
-
-  if (r->value != value || r->state != REG_STATE_CLEAN) {
-    r->value = value;
-    r->state = REG_STATE_MODIFIED;
-  }
-
-  return true;
-}
-
-static int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t reg_id, uint64_t value);
 
 int aarch64_restore_reg(struct aarch64 *a, uint32_t baseaddr, uint32_t reg_id)
 {
@@ -706,55 +730,22 @@ int aarch64_reg_read_64(struct aarch64 *a, uint32_t baseaddr, uint32_t reg,
   return 0;
 }
 
-static int aarch64_write_core_reg(struct aarch64 *a, uint32_t baseaddr,
-  uint32_t reg_id, uint64_t value)
-{
-  int ret;
-  uint32_t instructions[2];
-  int num_i;
-
-  if (reg_id <= AARCH64_STATE_REGS) {
-    ret = aarch64_regcache_mark_modified(a, baseaddr, reg_id);
-    if (ret)
-      return ret;
-  }
-
-  if (reg_id <= AARCH64_CORE_REG_X30) {
-    /* msr dbgdtr_el0, xN, where N==reg*/
-    instructions[0] = AARCH64_INSTR_MRS_DBGDTR_EL0(reg_id);
-    num_i = 1;
-  }
-  else if (reg_id == AARCH64_CORE_REG_PC) {
-    /* mrs x0, dbgdtr_el0, same as x0 = dbgdtr_el0 */
-    instructions[0] = AARCH64_I_MRS(X0, DBGDTR_EL0);
-    /* msr dlr_el0, x0 */
-    instructions[1] = AARCH64_I_MSR(DLR_EL0, X0);
-    num_i = 2;
-    ret = aarch64_regcache_mark_modified(a, baseaddr, AARCH64_CORE_REG_X0);
-    if (ret)
-      return ret;
-  }
-  else
-    return -EINVAL;
-
-  adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRRX_EL0,
-    value & 0xffffffff);
-
-  adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_DBGDTRTX_EL0,
-    (value >> 32) & 0xffffffff);
-
-  for (int i = 0; i < num_i; ++i) {
-    adiv5_mem_ap_write_word_e(a->dap, baseaddr + DBG_REG_ADDR_EDITR,
-      instructions[i]);
-  }
-
-  return aarch64_check_handle_sticky_error(a, baseaddr);
-}
-
 int aarch64_write_cached_reg(struct aarch64 *a, uint32_t baseaddr,
   uint32_t reg_id, uint64_t value)
 {
-  return aarch64_ctx_set_reg(&a->ctx, reg_id, value) ? 0 : -EIO;
+  struct reg *r;
+
+  if (reg_id > AARCH64_STATE_REGS)
+    return -EIO;
+
+  r = &a->ctx.regcache[reg_id];
+
+  if (r->value != value || r->state != REG_STATE_CLEAN) {
+    r->value = value;
+    r->state = REG_STATE_MODIFIED;
+  }
+
+  return 0;
 }
 
 int aarch64_read_cached_reg(struct aarch64 *a, uint32_t baseaddr,
@@ -1015,6 +1006,7 @@ int aarch64_init(struct aarch64 *a, struct adiv5_dap *d, uint32_t baseaddr,
 
   a->cache_line_fetched = false;
   a->dap = d;
+
   /*
    * Unlock Debug lock, to verify - readback the value in EDPRSR.OSLK, with 0
    * as UNLOCKED. Only after OSLK unlock the rest of the debug registers can
