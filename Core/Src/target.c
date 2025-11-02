@@ -276,8 +276,6 @@ static void arm_cmsis_mem_ap_examine(struct target *t, uint32_t baseaddr)
     t->core[core_idx].etm = baseaddr;
     t->core[core_idx].etm_exists = true;
   }
-  // adiv5_mem_ap_read_word_e(baseaddr + 0x314, &reg0);
-  //adiv5_mem_ap_read_word_e(baseaddr + 0x088, &reg1);
 }
 
 static bool target_parse_rom(struct target *t)
@@ -372,9 +370,9 @@ int target_core_reg_read64(struct target_core *c, uint32_t reg_id,
 int raspberrypi_soft_reset(struct target *t)
 {
   int ret;
-    /* Raspberry PI reset sequence */
-    /* 0x3f100024, (0x5a << 24) | 1 */
-    /* 0x3f10001c, (0x5a << 24) | 0x20 */
+  /* Raspberry PI reset sequence */
+  /* 0x3f100024, (0x5a << 24) | 1 */
+  /* 0x3f10001c, (0x5a << 24) | 0x20 */
 
   ret = target_core_mem_write(&t->core[0], MEM_ACCESS_SIZE_32, 0x3f100024,
     (0x5a << 24) | 1);

@@ -31,14 +31,21 @@ struct target {
   struct breakpoint breakpoints_hw[NUM_BREAKPOINTS_HW];
 };
 
+int target_init(struct target *t);
+
 int target_halt(struct target *d);
+
 bool target_is_halted(const struct target *t);
+
 int target_check_halted(struct target *t);
+
 int target_resume(struct target *d);
+
 int target_step(struct target *d);
+
 int target_breakpoint(struct target *d, bool remove, bool hardware,
   uint64_t arg);
-int target_init(struct target *t);
+
 int target_soft_reset(struct target *t);
 
 int target_mem_read(struct target *t, mem_access_size_t access_size,
@@ -57,4 +64,5 @@ int target_iter_regs(struct target *t, int core_idx, reg_iter_cb_t cb,
   void *arg);
 
 int target_exec(struct target *t, const uint32_t *instr, int count);
+
 void target_get_halt_reason(struct target *t, const char **str);
