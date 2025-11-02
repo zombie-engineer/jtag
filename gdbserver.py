@@ -389,7 +389,7 @@ class RSPServer:
       b = self.conn.recv(1)
       return b
     except socket.timeout as e:
-      self.__log_rsp.warn(f'exception while reading byte: {e}')
+      self.__log_rsp.warning(f'exception while reading byte: {e}')
       raise
     finally:
       self.conn.settimeout(None)
