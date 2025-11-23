@@ -57,6 +57,7 @@ class OsTask:
     return self.__name
 
   def __repr__(self):
+    result = ''
     result += f'tid:{self.get_tid()} addr:0x{self.__addr:016x}'
     result += f' "{self.__name}" ctx:0x{self.__cpuctx_addr:016x}'
     return result

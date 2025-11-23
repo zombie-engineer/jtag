@@ -916,7 +916,7 @@ def main(ttydev):
   parser.add_argument('-t', '--tty',
     help='tty device',
     dest='ttydev',
-    default='/dev/ttyACM0')
+    default='/dev/ttyJTAG')
 
   parser.add_argument('-e', '--elf',
     help='elf file',
