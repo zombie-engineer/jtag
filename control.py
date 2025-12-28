@@ -4,92 +4,15 @@ import struct
 import time
 import logging
 import argparse
-from bcm_sdhci import SDHCI
-from bcm_sdhost import SDHOST
+import bcm_spi as spi
 import bcm_gpio
 import bcm_clock_manager
 import sdhc
+from bcm_sdhci import SDHCI
+from bcm_sdhost import SDHOST
+import ili9341
 from elftools.elf.elffile import ELFFile
 import ctypes
-
-CMD6_CHECK_FUNCTION  = 0
-CMD6_SWITCH_FUNCTION = 1
-
-CARD_STATE_IDLE           = 0
-CARD_STATE_READY          = 1
-CARD_STATE_IDENTIFICATION = 2
-CARD_STATE_STANDBY        = 3
-CARD_STATE_TRAN           = 4
-CARD_STATE_DATA           = 5
-CARD_STATE_RECV           = 5
-CARD_STATE_PROG           = 6
-CARD_STATE_DISCARD        = 7
-CARD_STATE_UNKNOWN        = 0xff
-
-card_states = {
-  CARD_STATE_IDLE            : 'idle',
-  CARD_STATE_READY           : 'ready',
-  CARD_STATE_IDENTIFICATION  : 'identification',
-  CARD_STATE_STANDBY         : 'standby',
-  CARD_STATE_TRAN            : 'tran',
-  CARD_STATE_DATA            : 'data',
-  CARD_STATE_RECV            : 'recv',
-  CARD_STATE_PROG            : 'prog',
-  CARD_STATE_DISCARD         : 'discard',
-  CARD_STATE_UNKNOWN         : 'unknown',
-}
-
-all_states = [
-  CARD_STATE_IDLE,
-  CARD_STATE_READY,
-  CARD_STATE_IDENTIFICATION,
-  CARD_STATE_STANDBY,
-  CARD_STATE_TRAN,
-  CARD_STATE_DATA,
-  CARD_STATE_RECV,
-  CARD_STATE_PROG,
-  CARD_STATE_DISCARD
-]
-
-cmd_valid_states = {
-  0  : all_states,
-  2  : [CARD_STATE_READY],
-  3  : [CARD_STATE_IDENTIFICATION],
-  6  : [CARD_STATE_TRAN],
-  7  : [CARD_STATE_TRAN, CARD_STATE_STANDBY],
-  8  : [CARD_STATE_IDLE],
-  9  : [CARD_STATE_STANDBY],
-  13 : all_states,
-  17 : [CARD_STATE_TRAN],
-  55 : all_states,
-}
-
-acmd_valid_states = {
-   6 : [CARD_STATE_TRAN],
-  13 : [CARD_STATE_TRAN],
-  41 : [CARD_STATE_IDLE, CARD_STATE_READY],
-  51 : [CARD_STATE_TRAN],
-}
-
-cmd_target_states = {
-  0  : CARD_STATE_IDLE,
-  2  : CARD_STATE_IDENTIFICATION,
-  3  : CARD_STATE_STANDBY,
-  6  : None,
-  7  : CARD_STATE_TRAN,
-  8  : CARD_STATE_IDLE,
-  9  : CARD_STATE_STANDBY,
-  13 : None,
-  17 : None,
-  55 : None,
-}
-
-acmd_target_states = {
-   6 : None,
-  13 : None,
-  41 : CARD_STATE_READY,
-  51 : None,
-}
 
 #def measure_vpu_clock(t):
 #  div = 1000
@@ -317,205 +240,16 @@ class Target:
     return True
 
 
-def assert_state(is_acmd, cmd_idx, state):
-  if not is_acmd and cmd_idx == 0:
-    return
-
-  states_map = acmd_valid_states if is_acmd else cmd_valid_states
-  good_states = states_map[cmd_idx]
-  if state not in good_states:
-    msg = '{}CMD{} called not from one of expected states.\n'.format(
-      'A' if is_acmd else '',
-      cmd_idx)
-    good_states_list = ', '.join([card_states[i] for i in good_states])
-    msg += f'Allowed states are: {good_states_list}.\n'
-    msg += f'Current state: {card_states[state]}\n'
-    raise Exception(msg)
-
-
-def parse_r6(r: sdhc.cmd_result):
-  self.__log.debug(f'R6 response is: {r.resp0:08x}')
-  rca   = (r.resp0 >> 16) & 0xffff
-  old_state = (r.resp0 >> 9) & 0xf
-
-  for i in range(0, 9):
-    if r.resp0 & (1<<i):
-      logging.debug(f'bit {i}')
-  if (r.resp0 >> 13) & 1:
-    logging.debug('bit 19')
-  if (r.resp0 >> 14) & 1:
-    logging.debug('bit 22')
-  if (r.resp0 >> 15) & 1:
-    logging.debug('bit 23')
-  logging.info(f'prev_state={card_states[old_state]}, rca={rca}')
-  return rca, old_state
-
-
-class SD:
-  def __init__(self, sdhc: SDHCI, sdhost: SDHOST, use_sdhost):
-    self.__sdhc = sdhc
-    self.__sdhost = sdhost
-    self.__state = CARD_STATE_UNKNOWN
-    self.__use_sdhost = use_sdhost
-
-  def init(self):
-    if self.__use_sdhost:
-      self.__sdctrl = self.__sdhost
-      self.__sdhc.stop()
-      self.__sdhost.init_gpio()
-    else:
-      self.__sdctrl = self.__sdhc
-      self.__sdhost.stop()
-
-  def __set_state(self, state):
-    old_state = card_states[self.__state]
-    new_state = card_states[state]
-    print(f"SD::state: {old_state} -> {new_state}")
-    self.__state = state
-
-  def reset(self):
-    self.__sdctrl.reset()
-
-  def do_cmd(self, is_acmd, cmd_idx, blksize, arg1, read_resp, data_size):
-    resp_type = cmd_resp_type(is_acmd, cmd_idx)
-    assert_state(is_acmd, cmd_idx, self.__state)
-    ret = self.__sdctrl.cmd(is_acmd, cmd_idx, blksize, arg1, read_resp,
-      data_size)
-    if resp_type == sdhc.RESP_TYPE_R6:
-      rca, old_state = parse_r6(ret)
-      if old_state != self.__state:
-        raise Exception('Prev state incorrect. assumed:{}, was:{}'.format(
-          card_states[self.__state], card_states[state]))
-
-    new_state = target_states(is_acmd, cmd_idx)
-    if new_state is not None and new_state != self.__state:
-      logging.debug('State change \'{}\'->\'{}\''.format(card_states[self.__state],
-        card_states[new_state]))
-      self.__set_state(new_state)
-    else:
-      logging.debug('State is same \'{}\''.format(card_states[self.__state]))
-
-    return ret
-
-  def cmd0(self):
-    # GO_IDLE_STATE 
-    ret = self.do_cmd(False, 0, 0, 0, read_resp=False, data_size=0)
-    self.__set_state(CARD_STATE_IDLE)
-    return ret
-
-  def cmd2(self):
-    # ALL_SEND_CID
-    ret = self.do_cmd(False, 2, 0, 0, read_resp=True, data_size=0)
-    self.__set_state(CARD_STATE_IDENTIFICATION)
-    logging.debug(f'CID: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
-    cid_raw = (ret.resp3 << 96)|(ret.resp2 << 64)|(ret.resp1 << 32)|ret.resp0
-    # Last byte of CID is not reported, so result in RESP0..3 registers is
-    # shifted by 1 bite. We return CID as if CRC byte is removed to be able
-    # to parse that
-    cid_raw = cid_raw << 8
-    return cid_raw
-
-  def cmd3(self):
-    # SEND_RELATIVE_ADDR
-    ret = self.do_cmd(False, 3, 0, 0, read_resp=True, data_size=0)
-    rca, old_state = parse_r6(ret)
-    return rca
-
-  def cmd6(self, mode, power_limit, drive_strength, cmd_sys, access_mode):
-    # SWITCH FUNCTION
-    arg =  (access_mode    & 0xf) << 0
-    arg |= (cmd_sys        & 0xf) << 4
-    arg |= (drive_strength & 0xf) << 8
-    arg |= (power_limit    & 0xf) << 12
-    arg |= 0xff << 16
-    arg |= (mode & 1) << 31
-
-    blksize = 64
-    ret = self.do_cmd(False, 6, blksize, arg, read_resp=True, data_size=64)
-    data = [i for i in ret.data]
-    return data
-
-  def cmd7(self, rca):
-    # SELECT_CARD
-    arg = (rca << 16) & 0xffffffff
-    ret = self.do_cmd(False, 7, 0, arg, read_resp=True, data_size=0)
-    self.__set_state(CARD_STATE_TRAN)
-    return ret
-
-  def cmd8(self):
-    # SEND_IF_COND
-    # Response type is R7, so no state information
-    # Possible only in IDLE state and returns to IDLE
-
-    check_pattern = 0xdd
-    vhs = 1
-    arg = (1 << 8) | check_pattern
-    ret = self.do_cmd(False, 8, 0, arg, read_resp=True, data_size=0)
-    if ret.resp0 & 0xff != check_pattern:
-      logging.warning('CMD8 failed, pattern mismatch')
-      return False
-    return True
-
-  def cmd9(self, rca):
-    # SEND_CSD
-    arg = (rca << 16) & 0xffffffff
-    ret = self.do_cmd(False, 9, 0, arg, read_resp=True, data_size=0)
-    logging.info(f'CSD: {ret.resp0:08x}{ret.resp1:08x}{ret.resp2:08x}{ret.resp3:08x}')
-    csd_raw = (ret.resp3 << 96)|(ret.resp2 << 64)|(ret.resp1 << 32)|ret.resp0
-    if self.__sdctrl == self.__sdhc:
-      csd_raw <<= 8
-    return csd_raw
-
-  def cmd13(self, rca):
-    # SEND_STATUS
-    arg = (0<<15) | ((rca << 16) & 0xffff0000)
-    ret = self.do_cmd(False, 13, 0, arg, read_resp=True, data_size=0)
-    state = (ret.resp0 >> 9) & 0xf
-    logging.debug(f'state={card_states[state]}')
-    return state
-
-  def cmd55(self, rca):
-    arg = (rca << 16) & 0xffffffff
-    return self.do_cmd(False, 55, 0, arg, read_resp=True, data_size=0)
-
-  def cmd17(self, block_idx):
-    # READ_SINGLE_BLOCK
-    arg = block_idx
-    blksize = 512
-    return self.do_cmd(False, 17, blksize, arg, read_resp=True, data_size=512)
-
-  def acmd6(self, rca, bus_width_4):
-    # SET_BUS_WIDTH
-    self.cmd55(rca)
-    arg = 2 if bus_width_4 else 0
-    return self.do_cmd(True, 6, 0, arg, read_resp=True, data_size=0)
-
-  def acmd41(self, rca, arg):
-    self.cmd55(rca)
-    return self.do_cmd(True, 41, 0, arg, read_resp=True, data_size=0)
-
-  def acmd51(self, rca):
-    # SEND_SCR
-    self.cmd55(rca)
-    arg = 0
-    # For SDHCI blksize = (1<<16) | 8
-    blksize = 8
-    ret = self.do_cmd(True, 51, blksize, arg, read_resp=True, data_size=8)
-    return struct.unpack('>Q', ret.data)[0]
-
-  def set_bus_width4(self):
-    self.__sdctrl.set_bus_width4()
-
-  def set_high_speed(self):
-    self.__sdctrl.set_high_speed()
-
-
 class Soc:
   def __init__(self, t: Target, logger):
     self.__t = t
     self.clockman = bcm_clock_manager.BCMClockManager(t, logger)
     self.gpio = bcm_gpio.BCM_GPIO(t)
-    self.sd = SD(
+    self.spi = spi.BCM_SPI(t)
+    self.spi.reset()
+    self.spi.fifo_flush(True, True)
+
+    self.sd = sdhc.SD(
       SDHCI(self.__t, logger),
       SDHOST(self.gpio, self.__t, logger), use_sdhost=True)
 
@@ -556,46 +290,36 @@ class Soc:
     self.__t.resume()
 
 
-def parse_scr(v):
-  logging.info(f'SCR: 0x{v:016x}')
-  scr_struct            = (v >> 60) & 0xf
-  sd_spec               = (v >> 56) & 0xf
-  data_stat_after_erase = (v >> 55) & 1
-  sd_security           = (v >> 52) & 7
-  sd_bus_widths         = (v >> 48) & 0xf
-  sd_spec3              = (v >> 47) & 1
-  ex_security           = (v >> 43) & 0xf
-  sd_spec4              = (v >> 42) & 1
-  sd_specx              = (v >> 38) & 0xf
-  cmd_support           = (v >> 32) & 0x1f
-  ver = '1.0'
-  if sd_spec == 1:
-    ver = '1.1'
-  elif sd_spec == 2:
-    if sd_spec3 == 0:
-      ver = '2.0'
-    elif sd_spec3 == 1:
-      if sd_spec4 == 0:
-        ver = '3.0'
-      else:
-        ver = '4.xx'
-      if sd_specx == 1:
-        ver = '5.xx'
-      elif sd_specx == 2:
-        ver = '6.xx'
-      elif sd_specx == 3:
-        ver = '7.xx'
-      elif sd_specx == 4:
-        ver = '8.xx'
-      elif sd_specx == 5:
-        ver = '9.xx'
-  logging.debug(f'scr_struct: {scr_struct}')
-  logging.debug(f'sd_spec: {sd_spec}')
-  logging.debug(f'sd_spec3: {sd_spec3}')
-  logging.debug(f'sd_spec4: {sd_spec4}')
-  logging.debug(f'sd_specx: {sd_specx}')
-  logging.debug(f'sd_bus_widths: {sd_bus_widths:x}')
-  logging.debug(f'ver: {ver}')
+  def display(self):
+    d = ili9341.ILI9341(self.spi, self.gpio, gpio_pin_blk=19, gpio_pin_dc=13, gpio_pin_reset=6)
+    cs = self.spi.regs.spi_cs_write(0)
+    cs = self.spi.regs.spi_cs_read()
+    print(f'SPI_CS:{cs:08x} ', end = '')
+    print(spi.spi_cs_to_str(cs))
+    d.write_cmd(ili9341.ILI9341_CMD_SOFT_RESET)
+    d.write_cmd(ili9341.ILI9341_CMD_DISPLAY_OFF)
+    d.write_cmd(ili9341.ILI9341_CMD_MEM_ACCESS_CONTROL)
+    d.write_data([0xe8])
+    d.write_cmd(ili9341.ILI9341_CMD_COLMOD)
+    d.write_data([0x66])
+    d.write_cmd(ili9341.ILI9341_CMD_SLEEP_OUT)
+    d.write_cmd(ili9341.ILI9341_CMD_DISPLAY_ON)
+    d.write_cmd(ili9341.ILI9341_CMD_CASET)
+    d.write_data(ili9341.ili9341_caset_get_arg(20, 25))
+    d.write_cmd(ili9341.ILI9341_CMD_PASET)
+    d.write_data(ili9341.ili9341_paset_get_arg(20, 25))
+    d.write_cmd(ili9341.ILI9341_CMD_RAMWR)
+    while True:
+      for i in range(5):
+        d.write_data([0xff, 0x00, 0x00])
+      for i in range(5):
+        d.write_data([0xff, 0xff, 0x00])
+      for i in range(5):
+        d.write_data([0, 0xff, 0x00])
+      for i in range(5):
+        d.write_data([0, 0, 0xff])
+
+
 
 
 def parse_cid(cid):
@@ -793,7 +517,7 @@ def sd_init_data_transfer_mode(sd, rca):
   sd.cmd7(rca)
   # ACMD51 SEND_SCR
   scr = sd.acmd51(rca)
-  parse_scr(scr)
+  sdhc.parse_scr(scr, logging)
   sd.acmd6(rca, bus_width_4=True)
   time.sleep(100 * 0.001 * 0.001)
   sd.set_bus_width4()
@@ -870,6 +594,9 @@ def do_main(ttydev, action, elf):
   if action == 'reset':
     logging.info('resetting')
     soc.reset()
+  if action == 'display':
+    logging.info('display')
+    soc.display()
   elif action == 'resume':
     logging.info('resuming')
     soc.resume()
